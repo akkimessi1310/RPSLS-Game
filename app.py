@@ -1,3 +1,4 @@
+import os
 import random
 import gradio as gr
 import pandas as pd
@@ -169,4 +170,13 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo"
 
     btn_save.click(fn=save_everything_to_file, inputs=[n_history_state, t_history_state, leaderboard_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t], outputs=[download_file_target])
 
-demo.launch(inline=False, share=True)
+if __name__ == "__main__":
+    # Render assigns a port dynamically. We fetch it, or default to 10000.
+    port = int(os.environ.get("PORT", 10000))
+    
+    # We must set server_name to "0.0.0.0" for Render to detect the app.
+    demo.launch(
+        server_name="0.0.0.0", 
+        server_port=port, 
+        theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo")
+    )
