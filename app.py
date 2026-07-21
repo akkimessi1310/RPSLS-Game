@@ -57,7 +57,8 @@ def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_los
     current_round += 1
 
     if current_round <= 10:
-        tourney_banner = f"⚔️ Tournament Status: Round {current_round} / 10 | Standings -> {player_name}: {t_p_wins} | CPU: {t_cpu_wins}"
+        current_session_ties = (current_round - 1) - (t_p_wins + t_cpu_wins)
+        tourney_banner = f"⚔️ Tournament Status: Round {current_round} / 10 | Standings -> {player_name}: {t_p_wins} | CPU: {t_cpu_wins} | Ties: {current_session_ties}"
     else:
         tourney_active = False
         outcome_msg = f"🏆 TOURNAMENT OVER! {player_name} scored {t_p_wins} wins out of 10 rounds!"
@@ -79,12 +80,33 @@ def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_los
             tourney_banner, leaderboard_list, leaderboard_list)
 def start_tournament(player_name, t_wins, t_losses, t_ties):
     if not player_name.strip(): player_name = "Player 1"
-    banner = f"⚔️ Tournament Status: Round 1 / 10 | Standings -> {player_name}: 0 | CPU: 0"
+    banner = f"⚔️ Tournament Status: Round 1 / 10 | Standings -> {player_name}: 0 | CPU: 0 | Ties: 0"
     return True, 1, 0, 0, banner, gr.update(interactive=False, value=player_name), f"🏆 {t_wins}", f"🤖 {t_losses}", f"🤝 {t_ties}", "Tournament Mode Activated. Practice scores paused."
 
-def reset_and_unlock(n_wins, n_losses, n_ties, n_log):
-    return ("", "", "", "No analytical data recorded.", False, 1, 0, 0, "No tournament bracket active currently. Normal Mode Active.", gr.update(interactive=True), f"🏆 {n_wins}", f"🤖 {n_losses}", f"🤝 {n_ties}", n_log)
+def reset_and_unlock(n_wins, n_losses, n_ties, n_log, t_wins, t_losses, t_ties, t_log, tourney_active, current_round, t_p_wins, t_cpu_wins):
+    # Rollback logic: If a tournament is active and we played at least 1 round, we are aborting midway.
+    if tourney_active and current_round > 1:
+        rounds_played = current_round - 1
+        session_ties = rounds_played - (t_p_wins + t_cpu_wins)
+        
+        # Deduct the partial tournament stats from the global tracking
+        t_wins -= t_p_wins
+        t_losses -= t_cpu_wins
+        t_ties -= session_ties
+        
+        # Remove the partial matches from the tournament log
+        if rounds_played > 0:
+            t_log = t_log[:-rounds_played]
 
+    return (
+        "", "", "", "No analytical data recorded.", 
+        False, 1, 0, 0, 
+        "No tournament bracket active currently. Normal Mode Active.", 
+        gr.update(interactive=True), 
+        f"🏆 {n_wins}", f"🤖 {n_losses}", f"🤝 {n_ties}", n_log,
+        t_wins, t_losses, t_ties, t_log # Return the updated global tournament states
+    )
+    
 def clear_all_data():
     return ("", "", "", "No analytical data recorded.", "🏆 0", "🤖 0", "🤝 0", [], [], [], 0, 0, 0, 0, 0, 0, False, 1, 0, 0, "No tournament bracket active currently. Normal Mode Active.", gr.update(interactive=True, value=" "), [], [])
 
@@ -182,7 +204,21 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo"
 
     btn_theme.click(fn=None, js="() => { document.body.classList.toggle('dark'); }")
     btn_start_tourney.click(fn=start_tournament, inputs=[in_player_name, t_score_p, t_score_c, t_score_t], outputs=[tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, in_player_name, card_p, card_c, card_t, out_stats])
-    btn_reset.click(fn=reset_and_unlock, inputs=[n_score_p, n_score_c, n_score_t, n_history_state], outputs=[out_player, out_cpu, out_result, out_stats, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, in_player_name, card_p, card_c, card_t, history_table])
+    btn_reset.click(
+        fn=reset_and_unlock, 
+        inputs=[
+            n_score_p, n_score_c, n_score_t, n_history_state,
+            t_score_p, t_score_c, t_score_t, t_history_state,
+            tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins
+        ], 
+        outputs=[
+            out_player, out_cpu, out_result, out_stats, 
+            tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, 
+            out_tourney_status, in_player_name, 
+            card_p, card_c, card_t, history_table,
+            t_score_p, t_score_c, t_score_t, t_history_state
+        ]
+    )
     btn_clear_data.click(fn=clear_all_data, inputs=[], outputs=[out_player, out_cpu, out_result, out_stats, card_p, card_c, card_t, history_table, n_history_state, t_history_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, in_player_name, leaderboard_table, leaderboard_state])
 
     game_buttons = [(btn_rock, 1), (btn_paper, 2), (btn_scissors, 3), (btn_lizard, 4), (btn_spock, 5)]
