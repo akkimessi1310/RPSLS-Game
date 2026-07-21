@@ -109,10 +109,30 @@ def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, 
     temp_dir = tempfile.gettempdir()
     file_path = os.path.join(temp_dir, "rpsls_isolated_analytics_report.xlsx")
     with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-        df_normal.to_excel(writer, sheet_name="Normal Mode Logs", index=False)
-        df_tourney.to_excel(writer, sheet_name="Tournament Mode Logs", index=False)
-        df_leaderboard.to_excel(writer, sheet_name="Hall of Fame Registry", index=False)
-        df_stats.to_excel(writer, sheet_name="Divided Mode Analytics", index=False)
+        sheet = "Consolidated Analytics"
+        current_row = 0
+        
+        # Write Stats
+        df_stats.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
+        current_row += len(df_stats.index) + 3 
+        
+        # Write Leaderboard (with a title row)
+        pd.DataFrame([["--- Hall of Fame Registry ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
+        current_row += 1
+        df_leaderboard.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
+        current_row += len(df_leaderboard.index) + 3
+        
+        # Write Normal Logs (with a title row)
+        pd.DataFrame([["--- Normal Mode Logs ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
+        current_row += 1
+        df_normal.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
+        current_row += len(df_normal.index) + 3
+
+        # Write Tourney Logs (with a title row)
+        pd.DataFrame([["--- Tournament Mode Logs ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
+        current_row += 1
+        df_tourney.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
+
     return file_path
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo")) as demo:
     n_score_p, n_score_c, n_score_t, n_history_state = gr.State(0), gr.State(0), gr.State(0), gr.State([])
@@ -145,7 +165,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo"
             out_result = gr.Textbox(label="Last Match Result Feedback", interactive=False)
             out_stats = gr.Textbox(label="Analytical Platform Summary Table", lines=4, interactive=False, value="No analytical data recorded.")
             with gr.Row():
-                btn_save = gr.Button("💾 Export Consolidated 4-Tab Excel Document", variant="secondary")
+                btn_save = gr.Button("💾 Export Consolidated 1-Sheet Excel Document", variant="secondary")
                 btn_clear_data = gr.Button("🧹 Reset Leaderboard & Analytics Data", variant="stop")
             download_file_target = gr.File(label="Spreadsheet Output Window File", interactive=False)
         with gr.Column(scale=2):
