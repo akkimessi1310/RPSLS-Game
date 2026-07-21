@@ -1,4 +1,5 @@
 import os
+import tempfile
 import random
 import gradio as gr
 import pandas as pd
@@ -105,8 +106,8 @@ def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, 
         "Tournament Mode Count": [tot_t, t_w, t_l, t_t],
         "Tournament Mode Percentage Yield": ["100.0%", f"{(t_w*100/tot_t if tot_t>0 else 0):.1f}%", f"{(t_l*100/tot_t if tot_t>0 else 0):.1f}%", f"{(t_t*100/tot_t if tot_t>0 else 0):.1f}%"]
     })
-
-    file_path = "rpsls_isolated_analytics_report.xlsx"
+    temp_dir = tempfile.gettempdir()
+    file_path = os.path.join(temp_dir, "rpsls_isolated_analytics_report.xlsx")
     with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
         df_normal.to_excel(writer, sheet_name="Normal Mode Logs", index=False)
         df_tourney.to_excel(writer, sheet_name="Tournament Mode Logs", index=False)
