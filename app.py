@@ -71,7 +71,8 @@ def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_los
         leaderboard_list.append([player_name, int(t_p_wins), int(t_session_ties), int(t_cpu_wins), f"{t_p_wins * 10}%"])
         
         # FIX: Added x[2] to the lambda key tuple so it sorts by Wins first, then Ties second
-        leaderboard_list = sorted(leaderboard_list, key=lambda x: (x[1], x[2]), reverse=True)
+        # -x[1] sorts Wins Descending, -x[2] sorts Ties Descending, x[0].lower() sorts Name Ascending (A-Z)
+        leaderboard_list = sorted(leaderboard_list, key=lambda x: (-x[1], -x[2], x[0].lower()))
 
     total_t = t_wins + t_losses + t_ties
     stats_summary = f"🏆 TOURNAMENT MODE ANALYTICS:\nTotal Ranked Matches: {total_t}\nOverall Player Win Rate: {(t_wins*100/total_t if total_t>0 else 0):.1f}%\nOverall CPU Win Rate: {(t_losses*100/total_t if total_t>0 else 0):.1f}%\nTie Ratio: {(t_ties*100/total_t if total_t>0 else 0):.1f}%"
