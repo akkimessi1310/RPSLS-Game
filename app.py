@@ -91,7 +91,7 @@ def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_los
     return (p_name, c_name, outcome_msg, stats_summary,
             f"🏆 {t_wins}", f"🤖 {t_losses}", f"🤝 {t_ties}", n_log, n_log, t_log,
             n_wins, n_losses, n_ties, t_wins, t_losses, t_ties, tourney_active, current_round, t_p_wins, t_cpu_wins,
-            tourney_banner, leaderboard_list, leaderboard_list)
+            tourney_banner, leaderboard_list, leaderboard_list, normal_player_stats)
 
 def start_tournament(player_name, t_wins, t_losses, t_ties):
     if not player_name.strip(): player_name = "Player 1"
