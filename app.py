@@ -14,7 +14,8 @@ ACTION_PHRASES = {
 }
 WRITTEN_RULES_TEXT = "### 📖 Game Rules\n* Scissors cuts Paper | Paper covers Rock\n* Rock crushes Lizard | Lizard poisons Spock\n* Spock smashes Scissors | Scissors decapitates Lizard\n* Lizard eats Paper | Paper disproves Spock\n* Spock vaporizes Rock | Rock crushes Scissors"
 
-def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_losses, t_ties, t_log, tourney_active, current_round, t_p_wins, t_cpu_wins, player_name, leaderboard_list):
+def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_losses, t_ties, t_log, tourney_active, current_round, t_p_wins, t_cpu_wins, player_name, leaderboard_list, normal_player_stats):
+    if not player_name.strip(): player_name = "Player 1" # Ensure nameless players are grouped properly
     cpu_choice_num = random.randint(1, 5)
     p_name, c_name = CHOICES[player_choice_num], CHOICES[cpu_choice_num]
 
@@ -27,9 +28,19 @@ def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_los
 
     # Branch 1: Normal Practice Mode Processing
     if not tourney_active:
-        if win_tag == "Tie": n_ties += 1
-        elif win_tag == "Player": n_wins += 1
-        else: n_losses += 1
+        # Initialize player in the dictionary if not present
+        if player_name not in normal_player_stats:
+            normal_player_stats[player_name] = {"Wins": 0, "Losses": 0, "Ties": 0}
+
+        if win_tag == "Tie": 
+            n_ties += 1
+            normal_player_stats[player_name]["Ties"] += 1
+        elif win_tag == "Player": 
+            n_wins += 1
+            normal_player_stats[player_name]["Wins"] += 1
+        else: 
+            n_losses += 1
+            normal_player_stats[player_name]["Losses"] += 1
 
         n_log.append([len(n_log) + 1, p_name, c_name, "Tie" if win_tag == "Tie" else player_name if win_tag == "Player" else "CPU"])
         total_n = n_wins + n_losses + n_ties
@@ -38,7 +49,7 @@ def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_los
         return (p_name, c_name, outcome_msg, stats_summary,
                 f"🏆 {n_wins}", f"🤖 {n_losses}", f"🤝 {n_ties}", n_log, n_log, t_log,
                 n_wins, n_losses, n_ties, t_wins, t_losses, t_ties, tourney_active, current_round, t_p_wins, t_cpu_wins,
-                "🛑 Normal Practice Session Active.", leaderboard_list, leaderboard_list)
+                "🛑 Normal Practice Session is Active.", leaderboard_list, leaderboard_list, normal_player_stats)
 
     # Branch 2: Tournament Ranked Match Processing
     # Track the active tournament ties sub-metric count explicitly
@@ -112,10 +123,10 @@ def reset_and_unlock(n_wins, n_losses, n_ties, n_log, t_wins, t_losses, t_ties, 
     )
 
 def clear_all_data():
-    return ("", "", "", "No analytical data recorded.", "🏆 0", "🤖 0", "🤝 0", [], [], [], 0, 0, 0, 0, 0, 0, False, 1, 0, 0, "No tournament bracket active currently. Normal Mode Active.", gr.update(interactive=True, value=" "), [], [])
+    return ("", "", "", "No analytical data recorded.", "🏆 0", "🤖 0", "🤝 0", [], [], [], 0, 0, 0, 0, 0, 0, False, 1, 0, 0, "No tournament bracket active currently. Normal Mode Active.", gr.update(interactive=True, value=" "), [], [], {})
 
-def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, t_l, t_t):
-    if not n_log and not t_log and not leaderboard_list: return None
+def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, t_l, t_t, normal_player_stats):
+    if not n_log and not t_log and not leaderboard_list and not normal_player_stats: return None
     df_normal = pd.DataFrame(n_log, columns=["Round ID", "Player Move Choice", "CPU Move Choice", "Winner Label"])
     df_tourney = pd.DataFrame(t_log, columns=["Ranked Match ID", "Player Move Choice", "CPU Move Choice", "Winner Label"])
 
@@ -132,6 +143,17 @@ def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, 
         "Tournament Mode Count": [tot_t, t_w, t_l, t_t],
         "Tournament Mode Percentage Yield": ["100.0%", f"{(t_w*100/tot_t if tot_t>0 else 0):.1f}%", f"{(t_l*100/tot_t if tot_t>0 else 0):.1f}%", f"{(t_t*100/tot_t if tot_t>0 else 0):.1f}%"]
     })
+
+    normal_players_list = []
+    for name, stats in normal_player_stats.items():
+        w, l, t = stats["Wins"], stats["Losses"], stats["Ties"]
+        total = w + l + t
+        win_rate = f"{(w * 100 / total if total > 0 else 0):.1f}%"
+        normal_players_list.append([name, w, l, t, win_rate])
+    
+    df_normal_players = pd.DataFrame(normal_players_list, columns=["Player Name", "Normal Wins", "Normal Losses", "Normal Ties", "Normal Win Rate"])
+    df_normal_players = df_normal_players.sort_values(by=["Normal Wins", "Normal Ties"], ascending=[False, False])
+
     temp_dir = tempfile.gettempdir()
     file_path = os.path.join(temp_dir, "rpsls_isolated_analytics_report.xlsx")
     with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
@@ -148,6 +170,13 @@ def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, 
         df_leaderboard.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
         current_row += len(df_leaderboard.index) + 3
 
+        # Write Normal Mode Player Stats
+        if not df_normal_players.empty:
+            pd.DataFrame([["--- Normal Mode Player Stats ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
+            current_row += 1
+            df_normal_players.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
+            current_row += len(df_normal_players.index) + 3
+
         # Write Normal Logs (with a title row)
         pd.DataFrame([["--- Normal Mode Logs ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
         current_row += 1
@@ -160,12 +189,13 @@ def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, 
         df_tourney.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
 
     return file_path
-    
+
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo")) as demo:
     n_score_p, n_score_c, n_score_t, n_history_state = gr.State(0), gr.State(0), gr.State(0), gr.State([])
     t_score_p, t_score_c, t_score_t, t_history_state = gr.State(0), gr.State(0), gr.State(0), gr.State([])
     tourney_active_state, tourney_round_counter = gr.State(False), gr.State(1)
     tourney_p_wins, tourney_c_wins, leaderboard_state = gr.State(0), gr.State(0), gr.State([])
+    normal_player_stats_state = gr.State({}) # NEW: Dictionary to track normal mode stats per player
 
     with gr.Row():
         gr.Markdown("# 🎮 Rock Paper Scissors Lizard Spock (Arcade Edition)")
@@ -224,13 +254,13 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo"
             t_score_p, t_score_c, t_score_t, t_history_state
         ]
     )
-    btn_clear_data.click(fn=clear_all_data, inputs=[], outputs=[out_player, out_cpu, out_result, out_stats, card_p, card_c, card_t, history_table, n_history_state, t_history_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, in_player_name, leaderboard_table, leaderboard_state])
+    btn_clear_data.click(fn=clear_all_data, inputs=[], outputs=[out_player, out_cpu, out_result, out_stats, card_p, card_c, card_t, history_table, n_history_state, t_history_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, in_player_name, leaderboard_table, leaderboard_state, normal_player_stats_state])
 
     game_buttons = [(btn_rock, 1), (btn_paper, 2), (btn_scissors, 3), (btn_lizard, 4), (btn_spock, 5)]
     for btn, choice_val in game_buttons:
-        btn.click(fn=play_round, inputs=[gr.State(choice_val), n_score_p, n_score_c, n_score_t, n_history_state, t_score_p, t_score_c, t_score_t, t_history_state, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, in_player_name, leaderboard_state], outputs=[out_player, out_cpu, out_result, out_stats, card_p, card_c, card_t, history_table, n_history_state, t_history_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, leaderboard_table, leaderboard_state])
+        btn.click(fn=play_round, inputs=[gr.State(choice_val), n_score_p, n_score_c, n_score_t, n_history_state, t_score_p, t_score_c, t_score_t, t_history_state, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, in_player_name, leaderboard_state, normal_player_stats_state], outputs=[out_player, out_cpu, out_result, out_stats, card_p, card_c, card_t, history_table, n_history_state, t_history_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, leaderboard_table, leaderboard_state, normal_player_stats_state])
 
-    btn_save.click(fn=save_everything_to_file, inputs=[n_history_state, t_history_state, leaderboard_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t], outputs=[download_file_target])
+    btn_save.click(fn=save_everything_to_file, inputs=[n_history_state, t_history_state, leaderboard_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, normal_player_stats_state], outputs=[download_file_target])
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
@@ -241,3 +271,4 @@ if __name__ == "__main__":
         ssr_mode=False,
         theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo")
     )
+    
