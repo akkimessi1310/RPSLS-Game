@@ -123,7 +123,7 @@ def reset_and_unlock(n_wins, n_losses, n_ties, n_log, t_wins, t_losses, t_ties, 
     )
 
 def clear_all_data():
-    return ("", "", "", "No analytical data recorded.", "🏆 0", "🤖 0", "🤝 0", [], [], [], 0, 0, 0, 0, 0, 0, False, 1, 0, 0, "No tournament bracket active currently. Normal Mode Active.", gr.update(interactive=True, value=" "), [], [], {})
+    return ("", "", "", "No analytical data recorded.", "🏆 0", "🤖 0", "🤝 0", [], [], [], 0, 0, 0, 0, 0, 0, False, 1, 0, 0, "No tournament bracket active currently. Normal Mode Active.", gr.update(interactive=True, value=""), [], [], {})
 
 def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, t_l, t_t, normal_player_stats):
     if not n_log and not t_log and not leaderboard_list and not normal_player_stats: return None
@@ -207,7 +207,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo"
     with gr.Group():
         gr.Markdown("### 🕹️ Arcade Challenge Entry Zone")
         with gr.Row():
-            in_player_name = gr.Textbox(value=" ", label="Enter Your Name", interactive=True)
+            in_player_name = gr.Textbox(value="", label="Enter Your Name", interactive=True)
             btn_start_tourney = gr.Button("⚔️ Start 10-Round Tournament", variant="primary")
             btn_reset = gr.Button("🔄 Reset / Stop Tournament", variant="stop")
         out_tourney_status = gr.Textbox(value="No tournament is active currently. Normal Mode is Active.", label="Status Tracking", interactive=False)
