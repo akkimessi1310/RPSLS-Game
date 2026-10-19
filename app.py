@@ -35,7 +35,6 @@ def get_room(room_code):
     except: return None
 
 def save_room(room_code, room_data):
-    # FIXED: Use standard set, then apply expiration via the dedicated expire method
     key = f"RG:{room_code}"
     redis_client.set(key, json.dumps(room_data))
     redis_client.expire(key, 86400)
@@ -120,124 +119,140 @@ def advance_tournament(room):
     room["bracket"] = new_matches
     room["round"] += 1
 
+# --- CRASH CATCHING IMPLEMENTED HERE ---
 def host_room(client_id, player_name, mode, best_of):
-    if not player_name or not str(player_name).strip(): 
-        player_name = "Host"
+    try:
+        if not player_name or not str(player_name).strip(): 
+            player_name = "Host"
+            
+        code = generate_room_code()
+        target_score = 2 if best_of == "Best of 3" else 3
         
-    code = generate_room_code()
-    target_score = 2 if best_of == "Best of 3" else 3
-    
-    room_data = {
-        "host": client_id, "mode": mode, "target_score": target_score,
-        "status": "lobby", "players": {client_id: {"name": player_name}},
-        "bracket": [], "round": 1, "all_match_logs": [] 
-    }
-    save_room(code, room_data)
-    return code, gr.update(visible=False), gr.update(visible=True)
+        room_data = {
+            "host": client_id, "mode": mode, "target_score": target_score,
+            "status": "lobby", "players": {client_id: {"name": player_name}},
+            "bracket": [], "round": 1, "all_match_logs": [] 
+        }
+        save_room(code, room_data)
+        return code, "", gr.update(visible=False), gr.update(visible=True)
+    except Exception as e:
+        return "", f"❌ Database Connection Error: {str(e)}", gr.update(visible=True), gr.update(visible=False)
 
 def join_room(client_id, player_name, room_code):
-    if not room_code or not str(room_code).strip():
-        return "❌ Enter a code.", gr.update(), gr.update()
+    try:
+        if not room_code or not str(room_code).strip():
+            return "", "❌ Enter a code.", gr.update(), gr.update()
+            
+        code = str(room_code).upper().strip()
+        room = get_room(code)
         
-    code = str(room_code).upper().strip()
-    room = get_room(code)
-    
-    if not room: return "❌ Room not found.", gr.update(), gr.update()
-    if room["status"] != "lobby": return "❌ Game in progress.", gr.update(), gr.update()
-    if room["mode"] == "Casual 1v1" and len(room["players"]) >= 2: return "❌ Casual room is full.", gr.update(), gr.update()
-    if len(room["players"]) >= 16: return "❌ Tournament max capacity.", gr.update(), gr.update()
-    
-    if not player_name or not str(player_name).strip(): 
-        player_name = "Guest"
+        if not room: return "", "❌ Room not found.", gr.update(), gr.update()
+        if room["status"] != "lobby": return "", "❌ Game in progress.", gr.update(), gr.update()
+        if room["mode"] == "Casual 1v1" and len(room["players"]) >= 2: return "", "❌ Casual room is full.", gr.update(), gr.update()
+        if len(room["players"]) >= 16: return "", "❌ Tournament max capacity.", gr.update(), gr.update()
         
-    room["players"][client_id] = {"name": player_name}
-    save_room(code, room)
-    return f"Joined {code}!", gr.update(visible=False), gr.update(visible=True)
+        if not player_name or not str(player_name).strip(): 
+            player_name = "Guest"
+            
+        room["players"][client_id] = {"name": player_name}
+        save_room(code, room)
+        return code, f"Joined {code}!", gr.update(visible=False), gr.update(visible=True)
+    except Exception as e:
+        return "", f"❌ Database Connection Error: {str(e)}", gr.update(), gr.update()
 
 def start_game(client_id, room_code):
-    room = get_room(room_code)
-    if not room or room["host"] != client_id or len(room["players"]) < 2: return
-    room["status"] = "playing"
-    room["bracket"] = generate_bracket(room["players"])
-    save_room(room_code, room)
+    try:
+        room = get_room(room_code)
+        if not room or room["host"] != client_id or len(room["players"]) < 2: return
+        room["status"] = "playing"
+        room["bracket"] = generate_bracket(room["players"])
+        save_room(room_code, room)
+    except: pass
 
 def make_move_online(client_id, room_code, move):
-    room = get_room(room_code)
-    if not room or room["status"] != "playing": return
-    
-    match = next((m for m in room["bracket"] if m["winner"] is None and (m["p1"] == client_id or m["p2"] == client_id)), None)
-    if not match: return
-    
-    is_p1 = (match["p1"] == client_id)
-    
-    if room["mode"] == "PvC Tournament (10 Rounds)":
-        stats = match["p1_pvc_stats"] if is_p1 else match["p2_pvc_stats"]
-        if stats["played"] < 10:
-            cpu_move = random.randint(1, 5)
-            res = resolve_matchup(move, cpu_move)
-            stats["played"] += 1
-            if res == "P1": stats["w"] += 1
-            elif res == "P2": stats["l"] += 1
-            else: stats["t"] += 1
-            
-            p_name = room["players"][client_id]["name"]
-            room["all_match_logs"].insert(0, [room["round"], p_name, CHOICES[move], "CPU", CHOICES[cpu_move], res])
-            
-            if match["p1_pvc_stats"]["played"] == 10 and match["p2_pvc_stats"]["played"] == 10:
-                s1, s2 = match["p1_pvc_stats"], match["p2_pvc_stats"]
-                if s1["w"] > s2["w"]: match["winner"] = match["p1"]
-                elif s2["w"] > s1["w"]: match["winner"] = match["p2"]
-                elif s1["t"] > s2["t"]: match["winner"] = match["p1"]
-                elif s2["t"] > s1["t"]: match["winner"] = match["p2"]
-                else: match["winner"] = random.choice([match["p1"], match["p2"]])
-                advance_tournament(room)
-    else:
-        if is_p1: match["p1_move"] = move
-        else: match["p2_move"] = move
+    try:
+        room = get_room(room_code)
+        if not room or room["status"] != "playing": return
         
-        if match["p1_move"] and match["p2_move"]:
-            res = resolve_matchup(match["p1_move"], match["p2_move"])
-            p1_name, p2_name = room["players"][match["p1"]]["name"], room["players"][match["p2"]]["name"]
-            m1_name, m2_name = CHOICES[match["p1_move"]], CHOICES[match["p2_move"]]
-            
-            room["all_match_logs"].insert(0, [room["round"], p1_name, m1_name, p2_name, m2_name, res])
-            if res == "P1": match["p1_score"] += 1
-            elif res == "P2": match["p2_score"] += 1
+        match = next((m for m in room["bracket"] if m["winner"] is None and (m["p1"] == client_id or m["p2"] == client_id)), None)
+        if not match: return
+        
+        is_p1 = (match["p1"] == client_id)
+        
+        if room["mode"] == "PvC Tournament (10 Rounds)":
+            stats = match["p1_pvc_stats"] if is_p1 else match["p2_pvc_stats"]
+            if stats["played"] < 10:
+                cpu_move = random.randint(1, 5)
+                res = resolve_matchup(move, cpu_move)
+                stats["played"] += 1
+                if res == "P1": stats["w"] += 1
+                elif res == "P2": stats["l"] += 1
+                else: stats["t"] += 1
                 
-            match["p1_move"], match["p2_move"] = None, None
+                p_name = room["players"][client_id]["name"]
+                room["all_match_logs"].insert(0, [room["round"], p_name, CHOICES[move], "CPU", CHOICES[cpu_move], res])
+                
+                if match["p1_pvc_stats"]["played"] == 10 and match["p2_pvc_stats"]["played"] == 10:
+                    s1, s2 = match["p1_pvc_stats"], match["p2_pvc_stats"]
+                    if s1["w"] > s2["w"]: match["winner"] = match["p1"]
+                    elif s2["w"] > s1["w"]: match["winner"] = match["p2"]
+                    elif s1["t"] > s2["t"]: match["winner"] = match["p1"]
+                    elif s2["t"] > s1["t"]: match["winner"] = match["p2"]
+                    else: match["winner"] = random.choice([match["p1"], match["p2"]])
+                    advance_tournament(room)
+        else:
+            if is_p1: match["p1_move"] = move
+            else: match["p2_move"] = move
             
-            if match["p1_score"] == room["target_score"]: match["winner"] = match["p1"]
-            elif match["p2_score"] == room["target_score"]: match["winner"] = match["p2"]
-            
-            if match["winner"]: advance_tournament(room)
-            
-    save_room(room_code, room)
+            if match["p1_move"] and match["p2_move"]:
+                res = resolve_matchup(match["p1_move"], match["p2_move"])
+                p1_name, p2_name = room["players"][match["p1"]]["name"], room["players"][match["p2"]]["name"]
+                m1_name, m2_name = CHOICES[match["p1_move"]], CHOICES[match["p2_move"]]
+                
+                room["all_match_logs"].insert(0, [room["round"], p1_name, m1_name, p2_name, m2_name, res])
+                if res == "P1": match["p1_score"] += 1
+                elif res == "P2": match["p2_score"] += 1
+                    
+                match["p1_move"], match["p2_move"] = None, None
+                
+                if match["p1_score"] == room["target_score"]: match["winner"] = match["p1"]
+                elif match["p2_score"] == room["target_score"]: match["winner"] = match["p2"]
+                
+                if match["winner"]: advance_tournament(room)
+                
+        save_room(room_code, room)
+    except: pass
 
-# --- CRASH-PROOF UI SYNCING ---
+# --- STRICT PANDAS DATAFRAMES ENFORCED HERE ---
+df_empty_bracket = pd.DataFrame(columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
+df_empty_history = pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+df_empty_lb = pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
+
 def load_leaderboard_once():
-    # FIXED: Only called manually, not by the 1-second timer loop
-    return get_leaderboard_data() or []
+    data = get_leaderboard_data()
+    return pd.DataFrame(data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if data else df_empty_lb
 
 def sync_ui(client_id, room_code):
     if not room_code: 
-        return "<h3>Welcome to the Arena</h3>", "Waiting...", [], [], gr.update(visible=False)
+        return "<h3>Welcome to the Arena</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
     
     room = get_room(room_code)
     if not room: 
-        return "<h3>Room closed or expired</h3>", "Waiting...", [], [], gr.update(visible=False)
+        return "<h3>Room closed or expired</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
     
     logs_data = room.get("all_match_logs", [])
+    df_logs = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
     
     if room["status"] == "lobby":
         players_list = ", ".join([p["name"] for p in room["players"].values()])
         html = f"<h3>Room: {room_code} | Mode: {room['mode']}</h3><p>Players ({len(room['players'])}): {players_list}</p>"
         if room["host"] == client_id: html += "<p><em>You are host. Click Start when ready!</em></p>"
-        return html, "Waiting in lobby...", [], logs_data, gr.update(visible=False)
+        return html, "Waiting in lobby...", df_empty_bracket, df_logs, gr.update(visible=False)
         
     if room["status"] == "finished":
         champ_name = room["players"][room["champion"]]["name"]
         export_btn_state = gr.update(visible=True) if room["host"] == client_id else gr.update(visible=False)
-        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", [], logs_data, export_btn_state
+        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", df_empty_bracket, df_logs, export_btn_state
 
     html = f"<h3>🕹️ Live Round: {room['round']} | {room['mode']}</h3>"
     status = "Waiting..."
@@ -273,7 +288,8 @@ def sync_ui(client_id, room_code):
 
     if not my_match: status = "You have a Bye, or you were eliminated. Spectating..."
     
-    return html, status, bracket_data, logs_data, gr.update(visible=False)
+    df_bracket = pd.DataFrame(bracket_data, columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"]) if bracket_data else df_empty_bracket
+    return html, status, df_bracket, df_logs, gr.update(visible=False)
 
 # ==========================================
 # 4. OFFLINE PRACTICE LOGIC
@@ -302,13 +318,15 @@ def play_offline_round(move, p_wins, c_wins, ties, match_log, player_name):
     match_log.insert(0, [len(match_log) + 1, m_name, c_name, winner])
     stats = f"🏆 Wins: {p_wins} | 🤖 Losses: {c_wins} | 🤝 Ties: {ties}"
     
-    return msg, stats, match_log, p_wins, c_wins, ties
+    df_off = pd.DataFrame(match_log, columns=["Round ID", "Player Move", "CPU Move", "Winner"])
+    return msg, stats, df_off, p_wins, c_wins, ties
 
 def reset_offline():
-    return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", [], 0, 0, 0
+    df_empty_off = pd.DataFrame(columns=["Round ID", "Player Move", "CPU Move", "Winner"])
+    return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", df_empty_off, 0, 0, 0
 
 # ==========================================
-# 5. UNIVERSAL EXCEL EXPORT (Pandas Isolated Here)
+# 5. UNIVERSAL EXCEL EXPORT
 # ==========================================
 def export_all_data(room_code, offline_log):
     temp_dir = tempfile.gettempdir()
@@ -319,14 +337,14 @@ def export_all_data(room_code, offline_log):
         df_off.to_excel(writer, sheet_name="Offline Practice Logs", index=False)
         
         lb_data = get_leaderboard_data()
-        df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if lb_data else pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
+        df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if lb_data else df_empty_lb
         df_lb.to_excel(writer, sheet_name="Global Leaderboard", index=False)
         
         if room_code:
             room = get_room(room_code)
             if room:
                 logs_data = room.get("all_match_logs", [])
-                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
                 df_on.to_excel(writer, sheet_name="Online Tournament Logs", index=False)
                 
     return file_path
@@ -359,7 +377,9 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
                 gr.Markdown("#### 🔌 JOIN GAME")
                 join_code = gr.Textbox(label="Enter Room Code")
                 btn_join = gr.Button("JOIN ROOM")
-                sys_msg = gr.Markdown("")
+        
+        # DYNAMIC SYSTEM MESSAGE ADDED HERE TO SHOW DATABASE ERRORS
+        sys_msg = gr.Markdown("")
 
     with gr.Column(visible=False) as screen_game:
         top_banner = gr.HTML("Loading Arcade Data...")
@@ -396,7 +416,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     gr.Markdown("---")
     gr.Markdown("## 🏆 GLOBAL HALL OF FAME & EXPORT")
     
-    # Leaderboard is now loaded via a manual refresh button to prevent continuous UI looping
     btn_refresh_lb = gr.Button("🔄 Refresh Global Hall of Fame")
     lb_view_setup = gr.Dataframe(headers=["Champion Name", "Tournament Mode", "Lobby Size", "Status"], interactive=False)
     
@@ -409,17 +428,15 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     
     btn_theme.click(fn=None, js="() => { document.documentElement.classList.toggle('dark'); }")
     
-    # Display leaderboard once on page load using Gradio Load event
     demo.load(load_leaderboard_once, inputs=[], outputs=[lb_view_setup])
     btn_refresh_lb.click(load_leaderboard_once, inputs=[], outputs=[lb_view_setup])
     
-    btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, screen_setup, screen_game])
-    btn_join.click(join_room, inputs=[client_id, my_name, join_code], outputs=[sys_msg, screen_setup, screen_game]).then(
-        lambda code: code, inputs=join_code, outputs=active_room
-    )
+    # UNIFIED UI SYNC UPDATES WITH ERROR CATCHING
+    btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, sys_msg, screen_setup, screen_game])
+    btn_join.click(join_room, inputs=[client_id, my_name, join_code], outputs=[active_room, sys_msg, screen_setup, screen_game])
+    
     btn_start.click(start_game, inputs=[client_id, active_room], outputs=[])
     
-    # Timer ONLY handles live match updates now, not the leaderboard
     timer.tick(sync_ui, inputs=[client_id, active_room], outputs=[top_banner, match_status, bracket_view, history_view, btn_export_online])
     
     for btn, val in [(btn_r, 1), (btn_p, 2), (btn_s, 3), (btn_l, 4), (btn_k, 5)]:
