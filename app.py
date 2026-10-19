@@ -107,7 +107,6 @@ def append_global_match_log(round_num, p1, m1, p2, m2, res):
         log_str = redis_client.get("RG_GLOBAL_MATCH_LOGS")
         logs = json.loads(log_str) if log_str else []
         logs.insert(0, [round_num, p1, m1, p2, m2, res])
-        # Keep only the last 50 matches to prevent server bloat
         if len(logs) > 50: logs = logs[:50]
         redis_client.set("RG_GLOBAL_MATCH_LOGS", json.dumps(logs))
     except: pass
@@ -142,11 +141,13 @@ def generate_bracket(players, shuffle=True):
     matches = []
     for i in range(0, first_round_players, 2):
         matches.append({"p1": p_ids[i], "p2": p_ids[i+1], "p1_score": 0, "p2_score": 0, 
+                        "rounds_played": 0,
                         "p1_move": None, "p2_move": None, "winner": None,
                         "p1_pvc_stats": {"w":0, "l":0, "t":0, "played":0}, 
                         "p2_pvc_stats": {"w":0, "l":0, "t":0, "played":0}})
     for i in range(first_round_players, n):
         matches.append({"p1": p_ids[i], "p2": None, "p1_score": 1, "p2_score": 0, 
+                        "rounds_played": 0,
                         "p1_move": None, "p2_move": None, "winner": p_ids[i]})
     return matches
 
@@ -166,6 +167,7 @@ def advance_tournament(room):
     for i in range(0, len(winners), 2):
         new_matches.append({
             "p1": winners[i], "p2": winners[i+1], "p1_score": 0, "p2_score": 0, 
+            "rounds_played": 0,
             "p1_move": None, "p2_move": None, "winner": None,
             "p1_pvc_stats": {"w":0, "l":0, "t":0, "played":0}, 
             "p2_pvc_stats": {"w":0, "l":0, "t":0, "played":0}
@@ -239,8 +241,8 @@ def make_move_online(client_id, room_code, move):
                 
                 p_name = room["players"][client_id]["name"]
                 
-                # UPDATE: Send to global DB
-                append_global_match_log(room["round"], p_name, CHOICES[move], "CPU", CHOICES[cpu_move], res)
+                log_round = f"Stage {room['round']} (Rd {stats['played']})"
+                append_global_match_log(log_round, p_name, CHOICES[move], "CPU", CHOICES[cpu_move], res)
                 
                 if match["p1_pvc_stats"]["played"] == 10 and match["p2_pvc_stats"]["played"] == 10:
                     s1, s2 = match["p1_pvc_stats"], match["p2_pvc_stats"]
@@ -255,12 +257,13 @@ def make_move_online(client_id, room_code, move):
             else: match["p2_move"] = move
             
             if match["p1_move"] and match["p2_move"]:
+                match["rounds_played"] = match.get("rounds_played", 0) + 1
                 res = resolve_matchup(match["p1_move"], match["p2_move"])
                 p1_name, p2_name = room["players"][match["p1"]]["name"], room["players"][match["p2"]]["name"]
                 m1_name, m2_name = CHOICES[match["p1_move"]], CHOICES[match["p2_move"]]
                 
-                # UPDATE: Send to global DB
-                append_global_match_log(room["round"], p1_name, m1_name, p2_name, m2_name, res)
+                log_round = f"Round {match['rounds_played']}" if room["mode"] == "Casual 1v1" else f"Stage {room['round']} (Rd {match['rounds_played']})"
+                append_global_match_log(log_round, p1_name, m1_name, p2_name, m2_name, res)
                 
                 if res == "P1": match["p1_score"] += 1
                 elif res == "P2": match["p2_score"] += 1
@@ -302,7 +305,6 @@ def sync_ui(client_id, room_code):
     room = get_room(room_code)
     if not room: return "<h3>Room closed or expired</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
     
-    # UPDATE: Now pulls logs globally, independent of active room
     logs_data = get_global_match_logs()
     df_logs = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
     
@@ -430,7 +432,6 @@ def export_all_data(offline_log):
         df_off_lb = pd.DataFrame(off_lb_data, columns=["Player Name", "Wins", "Losses", "Ties", "Win Rate"]) if off_lb_data else df_empty_off_lb
         df_off_lb.to_excel(writer, sheet_name="Offline Leaderboard", index=False)
 
-        # UPDATED: Export the global match history
         logs_data = get_global_match_logs()
         df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
         df_on.to_excel(writer, sheet_name="Global Online Match History", index=False)
@@ -556,8 +557,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
 
     # Resets & Exports
     btn_hard_reset.click(hard_reset_all, inputs=[], outputs=[active_room, screen_setup, screen_game, off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_log, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_tourney_status])
-    
-    # Export now passes off_log but pulls match logs independently from Redis
     btn_export_all.click(export_all_data, inputs=[off_log], outputs=[download_file]).then(lambda: gr.update(visible=True), outputs=[download_file])
 
 if __name__ == "__main__":
