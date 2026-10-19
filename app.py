@@ -35,8 +35,10 @@ def get_room(room_code):
     except: return None
 
 def save_room(room_code, room_data):
-    # FIXED: upstash_redis uses .set() with the ex= keyword argument
-    redis_client.set(f"RG:{room_code}", json.dumps(room_data), ex=86400)
+    # FIXED: Use standard set, then apply expiration via the dedicated expire method
+    key = f"RG:{room_code}"
+    redis_client.set(key, json.dumps(room_data))
+    redis_client.expire(key, 86400)
 
 def room_exists(room_code):
     try:
@@ -119,7 +121,6 @@ def advance_tournament(room):
     room["round"] += 1
 
 def host_room(client_id, player_name, mode, best_of):
-    # SAFEGUARD: Protect against NoneType string errors
     if not player_name or not str(player_name).strip(): 
         player_name = "Host"
         
@@ -213,12 +214,11 @@ def make_move_online(client_id, room_code, move):
     save_room(room_code, room)
 
 # --- CRASH-PROOF UI SYNCING ---
-def sync_global_leaderboard():
-    # Returns a raw array instead of a DataFrame
+def load_leaderboard_once():
+    # FIXED: Only called manually, not by the 1-second timer loop
     return get_leaderboard_data() or []
 
 def sync_ui(client_id, room_code):
-    # Returns raw arrays instead of DataFrames to prevent Gradio rendering panics
     if not room_code: 
         return "<h3>Welcome to the Arena</h3>", "Waiting...", [], [], gr.update(visible=False)
     
@@ -302,11 +302,9 @@ def play_offline_round(move, p_wins, c_wins, ties, match_log, player_name):
     match_log.insert(0, [len(match_log) + 1, m_name, c_name, winner])
     stats = f"🏆 Wins: {p_wins} | 🤖 Losses: {c_wins} | 🤝 Ties: {ties}"
     
-    # Returns raw array instead of DataFrame
     return msg, stats, match_log, p_wins, c_wins, ties
 
 def reset_offline():
-    # Returns raw array instead of DataFrame
     return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", [], 0, 0, 0
 
 # ==========================================
@@ -397,7 +395,11 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
 
     gr.Markdown("---")
     gr.Markdown("## 🏆 GLOBAL HALL OF FAME & EXPORT")
+    
+    # Leaderboard is now loaded via a manual refresh button to prevent continuous UI looping
+    btn_refresh_lb = gr.Button("🔄 Refresh Global Hall of Fame")
     lb_view_setup = gr.Dataframe(headers=["Champion Name", "Tournament Mode", "Lobby Size", "Status"], interactive=False)
+    
     gr.Markdown("Export all Offline Practice stats, Global Leaderboards, and completed Online Tournament logs to Excel.")
     btn_export_all = gr.Button("💾 Generate Excel Spreadsheets", variant="secondary")
     download_file = gr.File(label="Download Excel Document", interactive=False, visible=False)
@@ -407,15 +409,18 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     
     btn_theme.click(fn=None, js="() => { document.documentElement.classList.toggle('dark'); }")
     
+    # Display leaderboard once on page load using Gradio Load event
+    demo.load(load_leaderboard_once, inputs=[], outputs=[lb_view_setup])
+    btn_refresh_lb.click(load_leaderboard_once, inputs=[], outputs=[lb_view_setup])
+    
     btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, screen_setup, screen_game])
     btn_join.click(join_room, inputs=[client_id, my_name, join_code], outputs=[sys_msg, screen_setup, screen_game]).then(
         lambda code: code, inputs=join_code, outputs=active_room
     )
     btn_start.click(start_game, inputs=[client_id, active_room], outputs=[])
     
-    timer.tick(sync_ui, inputs=[client_id, active_room], outputs=[top_banner, match_status, bracket_view, history_view, btn_export_online]).then(
-        sync_global_leaderboard, inputs=[], outputs=[lb_view_setup]
-    )
+    # Timer ONLY handles live match updates now, not the leaderboard
+    timer.tick(sync_ui, inputs=[client_id, active_room], outputs=[top_banner, match_status, bracket_view, history_view, btn_export_online])
     
     for btn, val in [(btn_r, 1), (btn_p, 2), (btn_s, 3), (btn_l, 4), (btn_k, 5)]:
         btn.click(make_move_online, inputs=[client_id, active_room, gr.State(val)], outputs=[])
