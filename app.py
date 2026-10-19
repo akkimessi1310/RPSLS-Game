@@ -101,11 +101,29 @@ def get_offline_lb_data():
         return json.loads(data) if data else []
     except: return []
 
+# --- NEW: GLOBAL MATCH LOG TRACKING ---
+def append_global_match_log(round_num, p1, m1, p2, m2, res):
+    try:
+        log_str = redis_client.get("RG_GLOBAL_MATCH_LOGS")
+        logs = json.loads(log_str) if log_str else []
+        logs.insert(0, [round_num, p1, m1, p2, m2, res])
+        # Keep only the last 50 matches to prevent server bloat
+        if len(logs) > 50: logs = logs[:50]
+        redis_client.set("RG_GLOBAL_MATCH_LOGS", json.dumps(logs))
+    except: pass
+
+def get_global_match_logs():
+    try:
+        data = redis_client.get("RG_GLOBAL_MATCH_LOGS")
+        return json.loads(data) if data else []
+    except: return []
+
 def wipe_all_leaderboards():
     try:
         redis_client.delete("RG_GLOBAL_LEADERBOARD")
         redis_client.delete("RG_OFFLINE_HOF")
         redis_client.delete("RG_OFFLINE_LEADERBOARD")
+        redis_client.delete("RG_GLOBAL_MATCH_LOGS")
     except: pass
     return load_all_leaderboards_once()
 
@@ -164,7 +182,7 @@ def host_room(client_id, player_name, mode, best_of):
         room_data = {
             "host": client_id, "mode": mode, "target_score": target_score,
             "status": "lobby", "players": {client_id: {"name": player_name}},
-            "bracket": [], "round": 1, "all_match_logs": [] 
+            "bracket": [], "round": 1
         }
         save_room(code, room_data)
         return code, "", gr.update(visible=False), gr.update(visible=True)
@@ -220,7 +238,9 @@ def make_move_online(client_id, room_code, move):
                 else: stats["t"] += 1
                 
                 p_name = room["players"][client_id]["name"]
-                room["all_match_logs"].insert(0, [room["round"], p_name, CHOICES[move], "CPU", CHOICES[cpu_move], res])
+                
+                # UPDATE: Send to global DB
+                append_global_match_log(room["round"], p_name, CHOICES[move], "CPU", CHOICES[cpu_move], res)
                 
                 if match["p1_pvc_stats"]["played"] == 10 and match["p2_pvc_stats"]["played"] == 10:
                     s1, s2 = match["p1_pvc_stats"], match["p2_pvc_stats"]
@@ -239,7 +259,9 @@ def make_move_online(client_id, room_code, move):
                 p1_name, p2_name = room["players"][match["p1"]]["name"], room["players"][match["p2"]]["name"]
                 m1_name, m2_name = CHOICES[match["p1_move"]], CHOICES[match["p2_move"]]
                 
-                room["all_match_logs"].insert(0, [room["round"], p1_name, m1_name, p2_name, m2_name, res])
+                # UPDATE: Send to global DB
+                append_global_match_log(room["round"], p1_name, m1_name, p2_name, m2_name, res)
+                
                 if res == "P1": match["p1_score"] += 1
                 elif res == "P2": match["p2_score"] += 1
                     
@@ -280,7 +302,8 @@ def sync_ui(client_id, room_code):
     room = get_room(room_code)
     if not room: return "<h3>Room closed or expired</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
     
-    logs_data = room.get("all_match_logs", [])
+    # UPDATE: Now pulls logs globally, independent of active room
+    logs_data = get_global_match_logs()
     df_logs = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
     
     if room["status"] == "lobby":
@@ -387,7 +410,7 @@ def hard_reset_all():
 # ==========================================
 # 5. UNIVERSAL EXCEL EXPORT
 # ==========================================
-def export_all_data(room_code, offline_log):
+def export_all_data(offline_log):
     temp_dir = tempfile.gettempdir()
     file_path = os.path.join(temp_dir, f"RPSLS_Arcade_Data.xlsx")
     
@@ -407,12 +430,10 @@ def export_all_data(room_code, offline_log):
         df_off_lb = pd.DataFrame(off_lb_data, columns=["Player Name", "Wins", "Losses", "Ties", "Win Rate"]) if off_lb_data else df_empty_off_lb
         df_off_lb.to_excel(writer, sheet_name="Offline Leaderboard", index=False)
 
-        if room_code:
-            room = get_room(room_code)
-            if room:
-                logs_data = room.get("all_match_logs", [])
-                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
-                df_on.to_excel(writer, sheet_name="Online Tournament Logs", index=False)
+        # UPDATED: Export the global match history
+        logs_data = get_global_match_logs()
+        df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
+        df_on.to_excel(writer, sheet_name="Global Online Match History", index=False)
     return file_path
 
 # ==========================================
@@ -535,7 +556,9 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
 
     # Resets & Exports
     btn_hard_reset.click(hard_reset_all, inputs=[], outputs=[active_room, screen_setup, screen_game, off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_log, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_tourney_status])
-    btn_export_all.click(export_all_data, inputs=[active_room, off_log], outputs=[download_file]).then(lambda: gr.update(visible=True), outputs=[download_file])
+    
+    # Export now passes off_log but pulls match logs independently from Redis
+    btn_export_all.click(export_all_data, inputs=[off_log], outputs=[download_file]).then(lambda: gr.update(visible=True), outputs=[download_file])
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
