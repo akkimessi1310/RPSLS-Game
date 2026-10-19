@@ -66,10 +66,6 @@ def get_leaderboard_data():
         return json.loads(lb_str) if lb_str else []
     except: return []
 
-def sync_global_leaderboard():
-    data = get_leaderboard_data()
-    return pd.DataFrame(data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
-
 # ==========================================
 # 3. ONLINE ENGINE (BRACKET & LOBBY)
 # ==========================================
@@ -204,27 +200,36 @@ def make_move_online(client_id, room_code, move):
             
     save_room(room_code, room)
 
+# --- BULLETPROOF EMPTY DATAFRAMES ---
+df_empty_bracket = pd.DataFrame(columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
+df_empty_history = pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+df_empty_lb = pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
+
+def sync_global_leaderboard():
+    data = get_leaderboard_data()
+    return pd.DataFrame(data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if data else df_empty_lb
+
 def sync_ui(client_id, room_code):
-    # Safely passes empty lists [] instead of Dataframes to prevent UI layout crashes
     if not room_code: 
-        return "<h3>Welcome to the Arena</h3>", "Waiting...", [], [], gr.update(visible=False)
+        return "<h3>Welcome to the Arena</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
     
     room = get_room(room_code)
     if not room: 
-        return "<h3>Room closed or expired</h3>", "Waiting...", [], [], gr.update(visible=False)
+        return "<h3>Room closed or expired</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
     
     logs_data = room.get("all_match_logs", [])
+    df_logs = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
     
     if room["status"] == "lobby":
         players_list = ", ".join([p["name"] for p in room["players"].values()])
         html = f"<h3>Room: {room_code} | Mode: {room['mode']}</h3><p>Players ({len(room['players'])}): {players_list}</p>"
         if room["host"] == client_id: html += "<p><em>You are host. Click Start when ready!</em></p>"
-        return html, "Waiting in lobby...", [], logs_data, gr.update(visible=False)
+        return html, "Waiting in lobby...", df_empty_bracket, df_logs, gr.update(visible=False)
         
     if room["status"] == "finished":
         champ_name = room["players"][room["champion"]]["name"]
         export_btn_state = gr.update(visible=True) if room["host"] == client_id else gr.update(visible=False)
-        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", [], logs_data, export_btn_state
+        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", df_empty_bracket, df_logs, export_btn_state
 
     html = f"<h3>🕹️ Live Round: {room['round']} | {room['mode']}</h3>"
     status = "Waiting..."
@@ -259,7 +264,9 @@ def sync_ui(client_id, room_code):
                 else: status = "⏳ Waiting for opponent to move..."
 
     if not my_match: status = "You have a Bye, or you were eliminated. Spectating..."
-    return html, status, bracket_data, logs_data, gr.update(visible=False)
+    
+    df_bracket = pd.DataFrame(bracket_data, columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"]) if bracket_data else df_empty_bracket
+    return html, status, df_bracket, df_logs, gr.update(visible=False)
 
 # ==========================================
 # 4. OFFLINE PRACTICE LOGIC
@@ -285,10 +292,13 @@ def play_offline_round(move, p_wins, c_wins, ties, match_log, player_name):
         
     match_log.insert(0, [len(match_log) + 1, m_name, c_name, winner])
     stats = f"🏆 Wins: {p_wins} | 🤖 Losses: {c_wins} | 🤝 Ties: {ties}"
-    return msg, stats, match_log, p_wins, c_wins, ties
+    
+    df_off = pd.DataFrame(match_log, columns=["Round ID", "Player Move", "CPU Move", "Winner"])
+    return msg, stats, df_off, p_wins, c_wins, ties
 
 def reset_offline():
-    return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", [], 0, 0, 0
+    df_empty_off = pd.DataFrame(columns=["Round ID", "Player Move", "CPU Move", "Winner"])
+    return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", df_empty_off, 0, 0, 0
 
 # ==========================================
 # 5. UNIVERSAL EXCEL EXPORT
@@ -298,32 +308,28 @@ def export_all_data(room_code, offline_log):
     file_path = os.path.join(temp_dir, f"RPSLS_Arcade_Data.xlsx")
     
     with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-        # Offline Logs
-        df_off = pd.DataFrame(offline_log, columns=["Round ID", "Player Move", "CPU Move", "Winner"])
+        df_off = pd.DataFrame(offline_log, columns=["Round ID", "Player Move", "CPU Move", "Winner"]) if offline_log else pd.DataFrame(columns=["Round ID", "Player Move", "CPU Move", "Winner"])
         df_off.to_excel(writer, sheet_name="Offline Practice Logs", index=False)
         
-        # Global Leaderboard
         lb_data = get_leaderboard_data()
-        df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
+        df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if lb_data else df_empty_lb
         df_lb.to_excel(writer, sheet_name="Global Leaderboard", index=False)
         
-        # Online Match Logs (If attached to a room)
         if room_code:
             room = get_room(room_code)
             if room:
                 logs_data = room.get("all_match_logs", [])
-                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
                 df_on.to_excel(writer, sheet_name="Online Tournament Logs", index=False)
                 
     return file_path
 
 # ==========================================
-# 6. GRADIO UI LAYOUT (One Page Architecture)
+# 6. GRADIO UI LAYOUT (Flat Page Architecture)
 # ==========================================
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     client_id = gr.State(lambda: str(uuid.uuid4()))
     active_room = gr.State("")
-    
     off_w, off_c, off_t, off_log = gr.State(0), gr.State(0), gr.State(0), gr.State([])
 
     with gr.Row():
@@ -333,67 +339,65 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     gr.Markdown("### Welcome! Enter your name below to play Online or Offline.")
     my_name = gr.Textbox(label="Player Name", value="Player 1")
 
-    # --- SECTION 1: ONLINE MULTIPLAYER ---
-    with gr.Accordion("🌐 ONLINE MULTIPLAYER (Click to Expand)", open=True):
-        with gr.Column(visible=True) as screen_setup:
-            with gr.Row():
-                with gr.Group():
-                    gr.Markdown("#### 🕹️ HOST GAME")
-                    host_mode = gr.Dropdown(["Casual 1v1", "PvP Tournament (3-16)", "PvC Tournament (10 Rounds)"], value="Casual 1v1", label="Mode Select")
-                    host_bo = gr.Radio(["Best of 3", "Best of 5"], value="Best of 3", label="Match Length")
-                    btn_host = gr.Button("CREATE ROOM", variant="primary")
-                with gr.Group():
-                    gr.Markdown("#### 🔌 JOIN GAME")
-                    join_code = gr.Textbox(label="Enter Room Code")
-                    btn_join = gr.Button("JOIN ROOM")
-                    sys_msg = gr.Markdown("")
-
-        with gr.Column(visible=False) as screen_game:
-            top_banner = gr.HTML("Loading Arcade Data...")
-            btn_start = gr.Button("🚀 START GAME (Host Only)", variant="primary")
-            
-            with gr.Row():
-                with gr.Column(scale=1):
-                    match_status = gr.Textbox(label="Action Required", interactive=False)
-                    with gr.Row():
-                        btn_r, btn_p, btn_s, btn_l, btn_k = [gr.Button("🪨"), gr.Button("📄"), gr.Button("✂️"), gr.Button("🦎"), gr.Button("🖖")]
-                with gr.Column(scale=2):
-                    gr.Markdown("### 📡 Live Match Bracket")
-                    bracket_view = gr.Dataframe(headers=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"], interactive=False)
-            
-            gr.Markdown("### 🕒 Online Match History Tracking")
-            history_view = gr.Dataframe(headers=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"], interactive=False)
-            btn_export_online = gr.Button("💾 Host: Unlock Full Data Export", visible=False, variant="primary")
-
-    # --- SECTION 2: OFFLINE PRACTICE ---
-    with gr.Accordion("🤖 OFFLINE PRACTICE (Click to Expand)", open=False):
-        gr.Markdown("Test your skills locally. Your stats are tracked below.")
+    gr.Markdown("---")
+    gr.Markdown("## 🌐 ONLINE MULTIPLAYER")
+    with gr.Column(visible=True) as screen_setup:
         with gr.Row():
-            with gr.Column():
-                with gr.Row():
-                    off_r, off_p, off_s, off_l, off_k = [gr.Button("🪨"), gr.Button("📄"), gr.Button("✂️"), gr.Button("🦎"), gr.Button("🖖")]
-                btn_reset_off = gr.Button("🔄 Reset Practice Stats", variant="stop")
-            with gr.Column():
-                off_msg = gr.Textbox(label="Match Result", interactive=False)
-                off_stats = gr.Textbox(label="Local Session Analytics", value="🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", interactive=False)
-                
-        gr.Markdown("### 🕒 Offline Round History Tracking")
-        off_history_view = gr.Dataframe(headers=["Round ID", "Player Move", "CPU Move", "Winner"], interactive=False)
+            with gr.Group():
+                gr.Markdown("#### 🕹️ HOST GAME")
+                host_mode = gr.Dropdown(["Casual 1v1", "PvP Tournament (3-16)", "PvC Tournament (10 Rounds)"], value="Casual 1v1", label="Mode Select")
+                host_bo = gr.Radio(["Best of 3", "Best of 5"], value="Best of 3", label="Match Length")
+                btn_host = gr.Button("CREATE ROOM", variant="primary")
+            with gr.Group():
+                gr.Markdown("#### 🔌 JOIN GAME")
+                join_code = gr.Textbox(label="Enter Room Code")
+                btn_join = gr.Button("JOIN ROOM")
+                sys_msg = gr.Markdown("")
 
-    # --- SECTION 3: GLOBAL LEADERBOARD & EXPORT ---
-    with gr.Accordion("🏆 GLOBAL HALL OF FAME & EXPORT", open=False):
-        lb_view_setup = gr.Dataframe(headers=["Champion Name", "Tournament Mode", "Lobby Size", "Status"], interactive=False)
-        gr.Markdown("Export all Offline Practice stats, Global Leaderboards, and completed Online Tournament logs to Excel.")
-        btn_export_all = gr.Button("💾 Generate Excel Spreadsheets", variant="secondary")
-        download_file = gr.File(label="Download Excel Document", interactive=False, visible=False)
+    with gr.Column(visible=False) as screen_game:
+        top_banner = gr.HTML("Loading Arcade Data...")
+        btn_start = gr.Button("🚀 START GAME (Host Only)", variant="primary")
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                match_status = gr.Textbox(label="Action Required", interactive=False)
+                with gr.Row():
+                    btn_r, btn_p, btn_s, btn_l, btn_k = [gr.Button("🪨"), gr.Button("📄"), gr.Button("✂️"), gr.Button("🦎"), gr.Button("🖖")]
+            with gr.Column(scale=2):
+                gr.Markdown("### 📡 Live Match Bracket")
+                bracket_view = gr.Dataframe(headers=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"], interactive=False)
+        
+        gr.Markdown("### 🕒 Online Match History Tracking")
+        history_view = gr.Dataframe(headers=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"], interactive=False)
+        btn_export_online = gr.Button("💾 Host: Unlock Full Data Export", visible=False, variant="primary")
+
+    gr.Markdown("---")
+    gr.Markdown("## 🤖 OFFLINE PRACTICE")
+    gr.Markdown("Test your skills locally. Your stats are tracked below.")
+    with gr.Row():
+        with gr.Column():
+            with gr.Row():
+                off_r, off_p, off_s, off_l, off_k = [gr.Button("🪨"), gr.Button("📄"), gr.Button("✂️"), gr.Button("🦎"), gr.Button("🖖")]
+            btn_reset_off = gr.Button("🔄 Reset Practice Stats", variant="stop")
+        with gr.Column():
+            off_msg = gr.Textbox(label="Match Result", interactive=False)
+            off_stats = gr.Textbox(label="Local Session Analytics", value="🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", interactive=False)
+            
+    gr.Markdown("### 🕒 Offline Round History Tracking")
+    off_history_view = gr.Dataframe(headers=["Round ID", "Player Move", "CPU Move", "Winner"], interactive=False)
+
+    gr.Markdown("---")
+    gr.Markdown("## 🏆 GLOBAL HALL OF FAME & EXPORT")
+    lb_view_setup = gr.Dataframe(headers=["Champion Name", "Tournament Mode", "Lobby Size", "Status"], interactive=False)
+    gr.Markdown("Export all Offline Practice stats, Global Leaderboards, and completed Online Tournament logs to Excel.")
+    btn_export_all = gr.Button("💾 Generate Excel Spreadsheets", variant="secondary")
+    download_file = gr.File(label="Download Excel Document", interactive=False, visible=False)
 
     # --- EVENT TRIGGERS ---
     timer = gr.Timer(value=1)
     
-    # Standard Tailwind/Gradio Dark Mode hook
     btn_theme.click(fn=None, js="() => { document.documentElement.classList.toggle('dark'); }")
     
-    # Online Logic
     btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, screen_setup, screen_game])
     btn_join.click(join_room, inputs=[client_id, my_name, join_code], outputs=[sys_msg, screen_setup, screen_game]).then(
         lambda code: code, inputs=join_code, outputs=active_room
@@ -407,12 +411,11 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     for btn, val in [(btn_r, 1), (btn_p, 2), (btn_s, 3), (btn_l, 4), (btn_k, 5)]:
         btn.click(make_move_online, inputs=[client_id, active_room, gr.State(val)], outputs=[])
 
-    # Offline Logic
     for btn, val in [(off_r, 1), (off_p, 2), (off_s, 3), (off_l, 4), (off_k, 5)]:
         btn.click(play_offline_round, inputs=[gr.State(val), off_w, off_c, off_t, off_log, my_name], outputs=[off_msg, off_stats, off_history_view, off_w, off_c, off_t])
+    
     btn_reset_off.click(reset_offline, inputs=[], outputs=[off_msg, off_stats, off_history_view, off_w, off_c, off_t])
 
-    # Universal Export Logic
     btn_export_all.click(export_all_data, inputs=[active_room, off_log], outputs=[download_file]).then(
         lambda: gr.update(visible=True), outputs=[download_file]
     )
