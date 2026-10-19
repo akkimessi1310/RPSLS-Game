@@ -35,10 +35,13 @@ def get_room(room_code):
     except: return None
 
 def save_room(room_code, room_data):
-    redis_client.setex(f"RG:{room_code}", 86400, json.dumps(room_data))
+    # FIXED: upstash_redis uses .set() with the ex= keyword argument
+    redis_client.set(f"RG:{room_code}", json.dumps(room_data), ex=86400)
 
 def room_exists(room_code):
-    return redis_client.exists(f"RG:{room_code}") > 0
+    try:
+        return redis_client.exists(f"RG:{room_code}") > 0
+    except: return False
 
 def generate_room_code():
     code = str(uuid.uuid4())[:5].upper()
@@ -116,7 +119,10 @@ def advance_tournament(room):
     room["round"] += 1
 
 def host_room(client_id, player_name, mode, best_of):
-    if not player_name.strip(): player_name = "Host"
+    # SAFEGUARD: Protect against NoneType string errors
+    if not player_name or not str(player_name).strip(): 
+        player_name = "Host"
+        
     code = generate_room_code()
     target_score = 2 if best_of == "Best of 3" else 3
     
@@ -129,15 +135,21 @@ def host_room(client_id, player_name, mode, best_of):
     return code, gr.update(visible=False), gr.update(visible=True)
 
 def join_room(client_id, player_name, room_code):
-    code = room_code.upper().strip()
+    if not room_code or not str(room_code).strip():
+        return "❌ Enter a code.", gr.update(), gr.update()
+        
+    code = str(room_code).upper().strip()
     room = get_room(code)
     
     if not room: return "❌ Room not found.", gr.update(), gr.update()
     if room["status"] != "lobby": return "❌ Game in progress.", gr.update(), gr.update()
     if room["mode"] == "Casual 1v1" and len(room["players"]) >= 2: return "❌ Casual room is full.", gr.update(), gr.update()
     if len(room["players"]) >= 16: return "❌ Tournament max capacity.", gr.update(), gr.update()
+    
+    if not player_name or not str(player_name).strip(): 
+        player_name = "Guest"
         
-    room["players"][client_id] = {"name": player_name if player_name.strip() else "Guest"}
+    room["players"][client_id] = {"name": player_name}
     save_room(code, room)
     return f"Joined {code}!", gr.update(visible=False), gr.update(visible=True)
 
@@ -200,36 +212,32 @@ def make_move_online(client_id, room_code, move):
             
     save_room(room_code, room)
 
-# --- BULLETPROOF EMPTY DATAFRAMES ---
-df_empty_bracket = pd.DataFrame(columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
-df_empty_history = pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
-df_empty_lb = pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
-
+# --- CRASH-PROOF UI SYNCING ---
 def sync_global_leaderboard():
-    data = get_leaderboard_data()
-    return pd.DataFrame(data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if data else df_empty_lb
+    # Returns a raw array instead of a DataFrame
+    return get_leaderboard_data() or []
 
 def sync_ui(client_id, room_code):
+    # Returns raw arrays instead of DataFrames to prevent Gradio rendering panics
     if not room_code: 
-        return "<h3>Welcome to the Arena</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
+        return "<h3>Welcome to the Arena</h3>", "Waiting...", [], [], gr.update(visible=False)
     
     room = get_room(room_code)
     if not room: 
-        return "<h3>Room closed or expired</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
+        return "<h3>Room closed or expired</h3>", "Waiting...", [], [], gr.update(visible=False)
     
     logs_data = room.get("all_match_logs", [])
-    df_logs = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
     
     if room["status"] == "lobby":
         players_list = ", ".join([p["name"] for p in room["players"].values()])
         html = f"<h3>Room: {room_code} | Mode: {room['mode']}</h3><p>Players ({len(room['players'])}): {players_list}</p>"
         if room["host"] == client_id: html += "<p><em>You are host. Click Start when ready!</em></p>"
-        return html, "Waiting in lobby...", df_empty_bracket, df_logs, gr.update(visible=False)
+        return html, "Waiting in lobby...", [], logs_data, gr.update(visible=False)
         
     if room["status"] == "finished":
         champ_name = room["players"][room["champion"]]["name"]
         export_btn_state = gr.update(visible=True) if room["host"] == client_id else gr.update(visible=False)
-        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", df_empty_bracket, df_logs, export_btn_state
+        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", [], logs_data, export_btn_state
 
     html = f"<h3>🕹️ Live Round: {room['round']} | {room['mode']}</h3>"
     status = "Waiting..."
@@ -265,14 +273,15 @@ def sync_ui(client_id, room_code):
 
     if not my_match: status = "You have a Bye, or you were eliminated. Spectating..."
     
-    df_bracket = pd.DataFrame(bracket_data, columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"]) if bracket_data else df_empty_bracket
-    return html, status, df_bracket, df_logs, gr.update(visible=False)
+    return html, status, bracket_data, logs_data, gr.update(visible=False)
 
 # ==========================================
 # 4. OFFLINE PRACTICE LOGIC
 # ==========================================
 def play_offline_round(move, p_wins, c_wins, ties, match_log, player_name):
-    if not player_name.strip(): player_name = "Player 1"
+    if not player_name or not str(player_name).strip(): 
+        player_name = "Player 1"
+        
     cpu_move = random.randint(1, 5)
     m_name, c_name = CHOICES[move], CHOICES[cpu_move]
     
@@ -293,15 +302,15 @@ def play_offline_round(move, p_wins, c_wins, ties, match_log, player_name):
     match_log.insert(0, [len(match_log) + 1, m_name, c_name, winner])
     stats = f"🏆 Wins: {p_wins} | 🤖 Losses: {c_wins} | 🤝 Ties: {ties}"
     
-    df_off = pd.DataFrame(match_log, columns=["Round ID", "Player Move", "CPU Move", "Winner"])
-    return msg, stats, df_off, p_wins, c_wins, ties
+    # Returns raw array instead of DataFrame
+    return msg, stats, match_log, p_wins, c_wins, ties
 
 def reset_offline():
-    df_empty_off = pd.DataFrame(columns=["Round ID", "Player Move", "CPU Move", "Winner"])
-    return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", df_empty_off, 0, 0, 0
+    # Returns raw array instead of DataFrame
+    return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", [], 0, 0, 0
 
 # ==========================================
-# 5. UNIVERSAL EXCEL EXPORT
+# 5. UNIVERSAL EXCEL EXPORT (Pandas Isolated Here)
 # ==========================================
 def export_all_data(room_code, offline_log):
     temp_dir = tempfile.gettempdir()
@@ -312,14 +321,14 @@ def export_all_data(room_code, offline_log):
         df_off.to_excel(writer, sheet_name="Offline Practice Logs", index=False)
         
         lb_data = get_leaderboard_data()
-        df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if lb_data else df_empty_lb
+        df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if lb_data else pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
         df_lb.to_excel(writer, sheet_name="Global Leaderboard", index=False)
         
         if room_code:
             room = get_room(room_code)
             if room:
                 logs_data = room.get("all_match_logs", [])
-                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
+                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
                 df_on.to_excel(writer, sheet_name="Online Tournament Logs", index=False)
                 
     return file_path
