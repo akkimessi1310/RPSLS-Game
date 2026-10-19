@@ -28,15 +28,17 @@ redis_client = Redis(
 )
 
 def get_room(room_code):
-    data = redis_client.get(room_code)
+    # Appends RG: prefix behind the scenes
+    data = redis_client.get(f"RG:{room_code}")
     return json.loads(data) if data else None
 
 def save_room(room_code, room_data):
-    # Saves room and sets it to expire after 24 hours (86400 seconds)
-    redis_client.setex(room_code, 86400, json.dumps(room_data))
+    # Appends RG: prefix behind the scenes
+    redis_client.setex(f"RG:{room_code}", 86400, json.dumps(room_data))
 
 def room_exists(room_code):
-    return redis_client.exists(room_code) > 0
+    # Appends RG: prefix behind the scenes
+    return redis_client.exists(f"RG:{room_code}") > 0
 
 def generate_room_code():
     code = str(uuid.uuid4())[:5].upper()
