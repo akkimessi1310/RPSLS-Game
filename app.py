@@ -1,9 +1,15 @@
 import os
-import tempfile
+import uuid
 import random
+import math
+import json
 import gradio as gr
 import pandas as pd
+from upstash_redis import Redis
 
+# ==========================================
+# 1. CONSTANTS & GAME RULES
+# ==========================================
 CHOICES = {1: "Rock", 2: "Paper", 3: "Scissors", 4: "Lizard", 5: "Spock"}
 ACTION_PHRASES = {
     (1, 3): "Rock crushes Scissors", (1, 4): "Rock crushes Lizard",
@@ -12,263 +18,310 @@ ACTION_PHRASES = {
     (4, 2): "Lizard eats Paper", (4, 5): "Lizard poisons Spock",
     (5, 1): "Spock vaporizes Rock", (5, 3): "Spock smashes Scissors"
 }
-WRITTEN_RULES_TEXT = "### 📖 Game Rules\n* Scissors cuts Paper | Paper covers Rock\n* Rock crushes Lizard | Lizard poisons Spock\n* Spock smashes Scissors | Scissors decapitates Lizard\n* Lizard eats Paper | Paper disproves Spock\n* Spock vaporizes Rock | Rock crushes Scissors"
 
-def play_round(player_choice_num, n_wins, n_losses, n_ties, n_log, t_wins, t_losses, t_ties, t_log, tourney_active, current_round, t_p_wins, t_cpu_wins, player_name, leaderboard_list, normal_player_stats):
-    if not player_name.strip(): player_name = "Player 1" # Ensure nameless players are grouped properly
-    cpu_choice_num = random.randint(1, 5)
-    p_name, c_name = CHOICES[player_choice_num], CHOICES[cpu_choice_num]
+# ==========================================
+# 2. REDIS DATABASE CONNECTION
+# ==========================================
+redis_client = Redis(
+    url=os.environ.get("UPSTASH_REDIS_REST_URL", ""),
+    token=os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+)
 
-    if player_choice_num == cpu_choice_num:
-        outcome_msg, win_tag = "🤝 It's a Tie!", "Tie"
-    elif (player_choice_num, cpu_choice_num) in ACTION_PHRASES:
-        outcome_msg, win_tag = f"🎉 {player_name} Wins! {ACTION_PHRASES[(player_choice_num, cpu_choice_num)]}.", "Player"
-    else:
-        outcome_msg, win_tag = f"😢 CPU Wins! {ACTION_PHRASES[(cpu_choice_num, player_choice_num)]}.", "CPU"
+def get_room(room_code):
+    data = redis_client.get(room_code)
+    return json.loads(data) if data else None
 
-    # Branch 1: Normal Practice Mode Processing
-    if not tourney_active:
-        # Initialize player in the dictionary if not present
-        if player_name not in normal_player_stats:
-            normal_player_stats[player_name] = {"Wins": 0, "Losses": 0, "Ties": 0}
+def save_room(room_code, room_data):
+    # Saves room and sets it to expire after 24 hours (86400 seconds)
+    redis_client.setex(room_code, 86400, json.dumps(room_data))
 
-        if win_tag == "Tie": 
-            n_ties += 1
-            normal_player_stats[player_name]["Ties"] += 1
-        elif win_tag == "Player": 
-            n_wins += 1
-            normal_player_stats[player_name]["Wins"] += 1
-        else: 
-            n_losses += 1
-            normal_player_stats[player_name]["Losses"] += 1
+def room_exists(room_code):
+    return redis_client.exists(room_code) > 0
 
-        n_log.append([len(n_log) + 1, p_name, c_name, "Tie" if win_tag == "Tie" else player_name if win_tag == "Player" else "CPU"])
-        total_n = n_wins + n_losses + n_ties
-        stats_summary = f"📊 NORMAL MODE ANALYTICS:\nTotal Casual Matches: {total_n}\nPlayer Win Rate: {(n_wins*100/total_n if total_n>0 else 0):.1f}%\nCPU Win Rate: {(n_losses*100/total_n if total_n>0 else 0):.1f}%\nTie Ratio: {(n_ties*100/total_n if total_n>0 else 0):.1f}%"
+def generate_room_code():
+    code = str(uuid.uuid4())[:5].upper()
+    while room_exists(code):
+        code = str(uuid.uuid4())[:5].upper()
+    return code
 
-        return (p_name, c_name, outcome_msg, stats_summary,
-                f"🏆 {n_wins}", f"🤖 {n_losses}", f"🤝 {n_ties}", n_log, n_log, t_log,
-                n_wins, n_losses, n_ties, t_wins, t_losses, t_ties, tourney_active, current_round, t_p_wins, t_cpu_wins,
-                "🛑 Normal Practice Session is Active.", leaderboard_list, leaderboard_list, normal_player_stats)
+def resolve_matchup(m1, m2):
+    if m1 == m2: return "Tie"
+    if (m1, m2) in ACTION_PHRASES: return "P1"
+    return "P2"
 
-    # Branch 2: Tournament Ranked Match Processing
-    # Track the active tournament ties sub-metric count explicitly
-    t_round_is_tie = 0
-    if win_tag == "Tie":
-        t_ties += 1
-        t_round_is_tie = 1
-    elif win_tag == "Player":
-        t_wins += 1
-        t_p_wins += 1
-    else:
-        t_losses += 1
-        t_cpu_wins += 1
-
-    t_log.append([len(t_log) + 1, p_name, c_name, player_name if win_tag == "Player" else "CPU" if win_tag == "CPU" else "Tie"])
-    current_round += 1
-
-    if current_round <= 10:
-        current_session_ties = (current_round - 1) - (t_p_wins + t_cpu_wins)
-        tourney_banner = f"⚔️ Tournament Status: Round {current_round} / 10 | Standings -> {player_name}: {t_p_wins} | CPU: {t_cpu_wins} | Ties: {current_session_ties}"
-    else:
-        tourney_active = False
-        outcome_msg = f"🏆 TOURNAMENT OVER! {player_name} scored {t_p_wins} wins out of 10 rounds!"
-        tourney_banner = "🏁 Tournament Completed! Click 'Reset / Stop Tournament' to clear space for a new challenger."
-
-        # Calculate ties from this individual 10-round tournament run
-        t_session_ties = 10 - (t_p_wins + t_cpu_wins)
-
-        # FEATURE UPDATE: Injected the individual session tie counter index value directly into the leaderboard state list
-        leaderboard_list.append([player_name, int(t_p_wins), int(t_session_ties), int(t_cpu_wins), f"{t_p_wins * 10}%"])
-
-        # FIX: Added x[2] to the lambda key tuple so it sorts by Wins first, then Ties second
-        # -x[1] sorts Wins Descending, -x[2] sorts Ties Descending, x[0].lower() sorts Name Ascending (A-Z)
-        leaderboard_list = sorted(leaderboard_list, key=lambda x: (-x[1], -x[2], x[0].lower()))
-
-    total_t = t_wins + t_losses + t_ties
-    stats_summary = f"🏆 TOURNAMENT MODE ANALYTICS:\nTotal Ranked Matches: {total_t}\nOverall Player Win Rate: {(t_wins*100/total_t if total_t>0 else 0):.1f}%\nOverall CPU Win Rate: {(t_losses*100/total_t if total_t>0 else 0):.1f}%\nTie Ratio: {(t_ties*100/total_t if total_t>0 else 0):.1f}%"
-
-    return (p_name, c_name, outcome_msg, stats_summary,
-            f"🏆 {t_wins}", f"🤖 {t_losses}", f"🤝 {t_ties}", n_log, n_log, t_log,
-            n_wins, n_losses, n_ties, t_wins, t_losses, t_ties, tourney_active, current_round, t_p_wins, t_cpu_wins,
-            tourney_banner, leaderboard_list, leaderboard_list, normal_player_stats)
-
-def start_tournament(player_name, t_wins, t_losses, t_ties):
-    if not player_name.strip(): player_name = "Player 1"
-    banner = f"⚔️ Tournament Status: Round 1 / 10 | Standings -> {player_name}: 0 | CPU: 0 | Ties: 0"
-    return True, 1, 0, 0, banner, gr.update(interactive=False, value=player_name), f"🏆 {t_wins}", f"🤖 {t_losses}", f"🤝 {t_ties}", "Tournament Mode Activated. Practice mode scores paused."
-
-def reset_and_unlock(n_wins, n_losses, n_ties, n_log, t_wins, t_losses, t_ties, t_log, tourney_active, current_round, t_p_wins, t_cpu_wins):
-    # Rollback logic: If a tournament is active and we played at least 1 round, we are aborting midway.
-    if tourney_active and current_round > 1:
-        rounds_played = current_round - 1
-        session_ties = rounds_played - (t_p_wins + t_cpu_wins)
-
-        # Deduct the partial tournament stats from the global tracking
-        t_wins -= t_p_wins
-        t_losses -= t_cpu_wins
-        t_ties -= session_ties
-
-        # Remove the partial matches from the tournament log
-        if rounds_played > 0:
-            t_log = t_log[:-rounds_played]
-
-    return (
-        "", "", "", "No analytical data recorded.",
-        False, 1, 0, 0,
-        "No tournament active currently. Normal Mode Active.",
-        gr.update(interactive=True),
-        f"🏆 {n_wins}", f"🤖 {n_losses}", f"🤝 {n_ties}", n_log,
-        t_wins, t_losses, t_ties, t_log # Return the updated global tournament states
-    )
-
-def clear_all_data():
-    return ("", "", "", "No analytical data recorded.", "🏆 0", "🤖 0", "🤝 0", [], [], [], 0, 0, 0, 0, 0, 0, False, 1, 0, 0, "No tournament bracket active currently. Normal Mode Active.", gr.update(interactive=True, value=""), [], [], {})
-
-def save_everything_to_file(n_log, t_log, leaderboard_list, n_w, n_l, n_t, t_w, t_l, t_t, normal_player_stats):
-    if not n_log and not t_log and not leaderboard_list and not normal_player_stats: return None
-    df_normal = pd.DataFrame(n_log, columns=["Round ID", "Player Move Choice", "CPU Move Choice", "Winner Label"])
-    df_tourney = pd.DataFrame(t_log, columns=["Ranked Match ID", "Player Move Choice", "CPU Move Choice", "Winner Label"])
-
-    # FEATURE UPDATE: Sync exporter header parsing array with new leaderboard dataframe configuration mapping properties
-    df_leaderboard = pd.DataFrame(leaderboard_list, columns=["Challenger Name", "Wins Summary", "Ties Summary", "CPU Defeats", "Tournament Win Rate"])
-
-    tot_n = n_w + n_l + n_t
-    tot_t = t_w + t_l + t_t
-
-    df_stats = pd.DataFrame({
-        "Analytical Category Summary": ["Total Rounds Played", "Total Player Wins", "Total CPU Victories", "Total Match Draws"],
-        "Normal Practice Mode Count": [tot_n, n_w, n_l, n_t],
-        "Normal Mode Percentage Yield": ["100.0%", f"{(n_w*100/tot_n if tot_n>0 else 0):.1f}%", f"{(n_l*100/tot_n if tot_n>0 else 0):.1f}%", f"{(n_t*100/tot_n if tot_n>0 else 0):.1f}%"],
-        "Tournament Mode Count": [tot_t, t_w, t_l, t_t],
-        "Tournament Mode Percentage Yield": ["100.0%", f"{(t_w*100/tot_t if tot_t>0 else 0):.1f}%", f"{(t_l*100/tot_t if tot_t>0 else 0):.1f}%", f"{(t_t*100/tot_t if tot_t>0 else 0):.1f}%"]
-    })
-
-    normal_players_list = []
-    for name, stats in normal_player_stats.items():
-        w, l, t = stats["Wins"], stats["Losses"], stats["Ties"]
-        total = w + l + t
-        win_rate = f"{(w * 100 / total if total > 0 else 0):.1f}%"
-        normal_players_list.append([name, w, l, t, win_rate])
+# ==========================================
+# 3. TOURNAMENT BRACKET ENGINE
+# ==========================================
+def generate_bracket(players):
+    p_ids = list(players.keys())
+    random.shuffle(p_ids)
     
-    df_normal_players = pd.DataFrame(normal_players_list, columns=["Player Name", "Normal Wins", "Normal Losses", "Normal Ties", "Normal Win Rate"])
-    df_normal_players = df_normal_players.sort_values(by=["Normal Wins", "Normal Ties"], ascending=[False, False])
+    n = len(p_ids)
+    next_power_of_2 = 2 ** math.ceil(math.log2(n)) if n > 0 else 0
+    byes = next_power_of_2 - n
+    first_round_players = n - byes
+    
+    matches = []
+    for i in range(0, first_round_players, 2):
+        matches.append({"p1": p_ids[i], "p2": p_ids[i+1], "p1_score": 0, "p2_score": 0, 
+                        "p1_move": None, "p2_move": None, "winner": None,
+                        "p1_pvc_stats": {"w":0, "l":0, "t":0, "played":0}, 
+                        "p2_pvc_stats": {"w":0, "l":0, "t":0, "played":0}})
+    
+    for i in range(first_round_players, n):
+        matches.append({"p1": p_ids[i], "p2": None, "p1_score": 1, "p2_score": 0, 
+                        "p1_move": None, "p2_move": None, "winner": p_ids[i]})
+        
+    return matches
 
-    temp_dir = tempfile.gettempdir()
-    file_path = os.path.join(temp_dir, "rpsls_isolated_analytics_report.xlsx")
-    with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-        sheet = "Consolidated Analytics"
-        current_row = 0
+def advance_tournament(room):
+    if not room or room["status"] == "finished": return
+    
+    all_done = all(m["winner"] is not None for m in room["bracket"])
+    if not all_done: return
 
-        # Write Stats
-        df_stats.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
-        current_row += len(df_stats.index) + 3
+    winners = [m["winner"] for m in room["bracket"]]
+    
+    if len(winners) == 1:
+        room["status"] = "finished"
+        room["champion"] = winners[0]
+        return
+    
+    new_matches = []
+    for i in range(0, len(winners), 2):
+        new_matches.append({
+            "p1": winners[i], "p2": winners[i+1], 
+            "p1_score": 0, "p2_score": 0, "p1_move": None, "p2_move": None, "winner": None,
+            "p1_pvc_stats": {"w":0, "l":0, "t":0, "played":0}, 
+            "p2_pvc_stats": {"w":0, "l":0, "t":0, "played":0}
+        })
+    room["bracket"] = new_matches
+    room["round"] += 1
 
-        # Write Leaderboard (with a title row)
-        pd.DataFrame([["--- Hall of Fame Registry ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
-        current_row += 1
-        df_leaderboard.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
-        current_row += len(df_leaderboard.index) + 3
+# ==========================================
+# 4. ONLINE LOBBY FUNCTIONS (Redis Enabled)
+# ==========================================
+def host_room(client_id, player_name, mode, best_of):
+    if not player_name.strip(): player_name = "Host"
+    code = generate_room_code()
+    target_score = 2 if best_of == "Best of 3" else 3
+    
+    room_data = {
+        "host": client_id,
+        "mode": mode,
+        "target_score": target_score,
+        "status": "lobby",
+        "players": {client_id: {"name": player_name}},
+        "bracket": [],
+        "round": 1,
+        "log": []
+    }
+    save_room(code, room_data)
+    return code, gr.update(visible=False), gr.update(visible=True)
 
-        # Write Normal Mode Player Stats
-        if not df_normal_players.empty:
-            pd.DataFrame([["--- Normal Mode Player Stats ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
-            current_row += 1
-            df_normal_players.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
-            current_row += len(df_normal_players.index) + 3
+def join_room(client_id, player_name, room_code):
+    code = room_code.upper().strip()
+    room = get_room(code)
+    
+    if not room: return "❌ Room not found.", gr.update(), gr.update()
+    if room["status"] != "lobby": return "❌ Game already in progress.", gr.update(), gr.update()
+    if room["mode"] == "Casual 1v1" and len(room["players"]) >= 2: return "❌ Casual room is full.", gr.update(), gr.update()
+    if len(room["players"]) >= 16: return "❌ Tournament is at max capacity (16).", gr.update(), gr.update()
+        
+    room["players"][client_id] = {"name": player_name if player_name.strip() else "Guest"}
+    save_room(code, room)
+    return f"Joined {code}!", gr.update(visible=False), gr.update(visible=True)
 
-        # Write Normal Logs (with a title row)
-        pd.DataFrame([["--- Normal Mode Logs ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
-        current_row += 1
-        df_normal.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
-        current_row += len(df_normal.index) + 3
+def start_game(client_id, room_code):
+    room = get_room(room_code)
+    if not room or room["host"] != client_id or len(room["players"]) < 2: return
+    
+    room["status"] = "playing"
+    room["bracket"] = generate_bracket(room["players"])
+    save_room(room_code, room)
 
-        # Write Tourney Logs (with a title row)
-        pd.DataFrame([["--- Tournament Mode Logs ---"]]).to_excel(writer, sheet_name=sheet, startrow=current_row, index=False, header=False)
-        current_row += 1
-        df_tourney.to_excel(writer, sheet_name=sheet, startrow=current_row, index=False)
+# ==========================================
+# 5. ONLINE GAMEPLAY LOGIC (Redis Enabled)
+# ==========================================
+def make_move_online(client_id, room_code, move):
+    room = get_room(room_code)
+    if not room or room["status"] != "playing": return
+    
+    match = None
+    is_p1 = False
+    for m in room["bracket"]:
+        if m["winner"] is None and (m["p1"] == client_id or m["p2"] == client_id):
+            match = m
+            is_p1 = (m["p1"] == client_id)
+            break
+            
+    if not match: return
+    
+    if room["mode"] == "PvC Tournament (10 Rounds)":
+        stats = match["p1_pvc_stats"] if is_p1 else match["p2_pvc_stats"]
+        if stats["played"] < 10:
+            cpu_move = random.randint(1, 5)
+            res = resolve_matchup(move, cpu_move)
+            stats["played"] += 1
+            if res == "P1": stats["w"] += 1
+            elif res == "P2": stats["l"] += 1
+            else: stats["t"] += 1
+            
+            if match["p1_pvc_stats"]["played"] == 10 and match["p2_pvc_stats"]["played"] == 10:
+                s1, s2 = match["p1_pvc_stats"], match["p2_pvc_stats"]
+                if s1["w"] > s2["w"]: match["winner"] = match["p1"]
+                elif s2["w"] > s1["w"]: match["winner"] = match["p2"]
+                elif s1["t"] > s2["t"]: match["winner"] = match["p1"]
+                elif s2["t"] > s1["t"]: match["winner"] = match["p2"]
+                else: match["winner"] = random.choice([match["p1"], match["p2"]])
+                advance_tournament(room)
+    else:
+        if is_p1: match["p1_move"] = move
+        else: match["p2_move"] = move
+        
+        if match["p1_move"] and match["p2_move"]:
+            res = resolve_matchup(match["p1_move"], match["p2_move"])
+            p1_name, p2_name = room["players"][match["p1"]]["name"], room["players"][match["p2"]]["name"]
+            m1_name, m2_name = CHOICES[match["p1_move"]], CHOICES[match["p2_move"]]
+            
+            if res == "P1": 
+                match["p1_score"] += 1
+                room["log"].insert(0, f"{p1_name} won round! {m1_name} vs {m2_name}")
+            elif res == "P2": 
+                match["p2_score"] += 1
+                room["log"].insert(0, f"{p2_name} won round! {m2_name} vs {m1_name}")
+            else:
+                room["log"].insert(0, f"Tie! Both chose {m1_name}")
+                
+            match["p1_move"], match["p2_move"] = None, None
+            
+            if match["p1_score"] == room["target_score"]: match["winner"] = match["p1"]
+            elif match["p2_score"] == room["target_score"]: match["winner"] = match["p2"]
+            
+            if match["winner"]: advance_tournament(room)
+            
+    save_room(room_code, room)
 
-    return file_path
+# ==========================================
+# 6. UI SYNCHRONIZATION (Polling from Redis)
+# ==========================================
+def sync_ui(client_id, room_code):
+    if not room_code: return gr.update(value="Not in a room"), "", pd.DataFrame()
+    room = get_room(room_code)
+    if not room: return gr.update(value="Room closed or expired"), "", pd.DataFrame()
+    
+    players_list = ", ".join([p["name"] for p in room["players"].values()])
+    
+    if room["status"] == "lobby":
+        html = f"<h3>Room: {room_code} | Mode: {room['mode']}</h3><p>Players ({len(room['players'])}): {players_list}</p>"
+        if room["host"] == client_id: html += "<p><em>You are host. Click Start when ready!</em></p>"
+        return html, "Waiting in lobby...", pd.DataFrame()
+        
+    if room["status"] == "finished":
+        champ_name = room["players"][room["champion"]]["name"]
+        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", pd.DataFrame()
 
-with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo")) as demo:
-    n_score_p, n_score_c, n_score_t, n_history_state = gr.State(0), gr.State(0), gr.State(0), gr.State([])
-    t_score_p, t_score_c, t_score_t, t_history_state = gr.State(0), gr.State(0), gr.State(0), gr.State([])
-    tourney_active_state, tourney_round_counter = gr.State(False), gr.State(1)
-    tourney_p_wins, tourney_c_wins, leaderboard_state = gr.State(0), gr.State(0), gr.State([])
-    normal_player_stats_state = gr.State({}) # NEW: Dictionary to track normal mode stats per player
+    html = f"<h3>Round {room['round']} | {room['mode']}</h3>"
+    status = "Waiting..."
+    bracket_data = []
+    my_match = None
 
-    with gr.Row():
-        gr.Markdown("# 🎮 Rock Paper Scissors Lizard Spock (Arcade Edition)")
-        btn_theme = gr.Button("🌓 Toggle Dark Mode", variant="secondary")
-    with gr.Row():
-        card_p = gr.Label(value="🏆 0", label="Active Mode Player Wins")
-        card_c = gr.Label(value="🤖 0", label="Active Mode CPU Wins")
-        card_t = gr.Label(value="🤝 0", label="Active Mode Draw Ties")
-    with gr.Group():
-        gr.Markdown("### 🕹️ Arcade Challenge Entry Zone")
-        with gr.Row():
-            in_player_name = gr.Textbox(value="", label="Enter Your Name", interactive=True)
-            btn_start_tourney = gr.Button("⚔️ Start 10-Round Tournament", variant="primary")
-            btn_reset = gr.Button("🔄 Reset / Stop Tournament", variant="stop")
-        out_tourney_status = gr.Textbox(value="No tournament is active currently. Normal Mode is Active.", label="Status Tracking", interactive=False)
-    with gr.Row():
-        with gr.Column(scale=3):
-            gr.Markdown("### Cast Your Move Inputs Below:")
+    for m in room["bracket"]:
+        p1n = room["players"][m["p1"]]["name"]
+        p2n = room["players"][m["p2"]]["name"] if m["p2"] else "BYE"
+        m_stat = "Finished" if m["winner"] else "Playing"
+        
+        if room["mode"] == "PvC Tournament (10 Rounds)":
+            p1_inf = f"{m['p1_pvc_stats']['w']}W-{m['p1_pvc_stats']['l']}L (Played {m['p1_pvc_stats']['played']}/10)"
+            p2_inf = f"{m['p2_pvc_stats']['w']}W-{m['p2_pvc_stats']['l']}L (Played {m['p2_pvc_stats']['played']}/10)" if m["p2"] else "-"
+            bracket_data.append([p1n, p1_inf, "vs", p2n, p2_inf, m_stat])
+            
+            if not m["winner"] and (m["p1"] == client_id or m["p2"] == client_id):
+                my_match = m
+                is_p1 = (m["p1"] == client_id)
+                played = m['p1_pvc_stats']['played'] if is_p1 else m['p2_pvc_stats']['played']
+                if played < 10: status = f"Your Turn: Play against CPU! ({played}/10 complete)"
+                else: status = "Finished your 10 rounds. Waiting for opponent..."
+        else:
+            bracket_data.append([p1n, m["p1_score"], "vs", p2n, m["p2_score"] if m["p2"] else "-", m_stat])
+            
+            if not m["winner"] and (m["p1"] == client_id or m["p2"] == client_id):
+                my_match = m
+                is_p1 = (m["p1"] == client_id)
+                my_move = m["p1_move"] if is_p1 else m["p2_move"]
+                
+                if my_move is None: status = "🟢 YOUR TURN - Make a move!"
+                else: status = "⏳ Waiting for opponent to move..."
+
+    if not my_match: status = "You have a Bye, or you were eliminated. Spectating..."
+    df = pd.DataFrame(bracket_data, columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
+    return html, status, df
+
+# ==========================================
+# 7. GRADIO UI LAYOUT
+# ==========================================
+with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple")) as demo:
+    client_id = gr.State(lambda: str(uuid.uuid4()))
+    active_room = gr.State("")
+
+    gr.Markdown("# 🎮 RPSLS Arena: Online Edition")
+    
+    with gr.Tabs():
+        with gr.Tab("🌐 Online Arena"):
+            with gr.Column(visible=True) as screen_setup:
+                gr.Markdown("### Welcome to the Multiplayer Hub!")
+                my_name = gr.Textbox(label="Your Name", value="Player")
+                with gr.Row():
+                    with gr.Group():
+                        gr.Markdown("#### Host a Game")
+                        host_mode = gr.Dropdown(["Casual 1v1", "PvP Tournament (3-16)", "PvC Tournament (10 Rounds)"], value="Casual 1v1", label="Game Mode")
+                        host_bo = gr.Radio(["Best of 3", "Best of 5"], value="Best of 3", label="Match Length")
+                        btn_host = gr.Button("Create Room", variant="primary")
+                    with gr.Group():
+                        gr.Markdown("#### Join a Game")
+                        join_code = gr.Textbox(label="Enter 5-Letter Room Code")
+                        btn_join = gr.Button("Join Room")
+                        sys_msg = gr.Markdown("")
+
+            with gr.Column(visible=False) as screen_game:
+                top_banner = gr.HTML("Loading room...")
+                btn_start = gr.Button("🚀 Host: Start Tournament / Match", variant="primary")
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        match_status = gr.Textbox(label="Action Required", interactive=False)
+                        with gr.Row():
+                            btn_r, btn_p, btn_s, btn_l, btn_k = [gr.Button("🪨"), gr.Button("📄"), gr.Button("✂️"), gr.Button("🦎"), gr.Button("🖖")]
+                    with gr.Column(scale=2):
+                        bracket_view = gr.Dataframe(headers=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"], interactive=False)
+
+            timer = gr.Timer(value=1)
+            
+            btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, screen_setup, screen_game])
+            btn_join.click(join_room, inputs=[client_id, my_name, join_code], outputs=[sys_msg, screen_setup, screen_game]).then(
+                lambda code: code, inputs=join_code, outputs=active_room
+            )
+            btn_start.click(start_game, inputs=[client_id, active_room], outputs=[])
+            timer.tick(sync_ui, inputs=[client_id, active_room], outputs=[top_banner, match_status, bracket_view])
+            for btn, val in [(btn_r, 1), (btn_p, 2), (btn_s, 3), (btn_l, 4), (btn_k, 5)]:
+                btn.click(make_move_online, inputs=[client_id, active_room, gr.State(val)], outputs=[])
+
+        with gr.Tab("🤖 Offline Practice"):
+            gr.Markdown("Test your skills locally against the AI.")
             with gr.Row():
-                btn_rock, btn_paper, btn_scissors, btn_lizard, btn_spock = gr.Button("🪨 Rock"), gr.Button("📄 Paper"), gr.Button("✂️ Scissors"), gr.Button("🦎 Lizard"), gr.Button("🖖 Spock")
-            with gr.Row():
-                out_player = gr.Textbox(label="Your Hand Gesture", interactive=False)
-                out_cpu = gr.Textbox(label="CPU Hand Gesture", interactive=False)
-            out_result = gr.Textbox(label="Last Match Result Feedback", interactive=False)
-            out_stats = gr.Textbox(label="Analytical Platform Summary Table", lines=4, interactive=False, value="No analytical data recorded.")
-            with gr.Row():
-                btn_save = gr.Button("💾 Export Consolidated Excel Document", variant="secondary")
-                btn_clear_data = gr.Button("🧹 Reset Leaderboard & Analytics Data", variant="stop")
-            download_file_target = gr.File(label="Spreadsheet Output Window File", interactive=False)
-        with gr.Column(scale=2):
-            gr.Markdown(WRITTEN_RULES_TEXT)
-    with gr.Row():
-        with gr.Column():
-            gr.Markdown("### 🕒 Live Round Match Log Table Feed Grid View (Normal Mode)")
-            history_table = gr.Dataframe(headers=["Round ID", "Player Move Choice", "CPU Move Choice", "Winner Label"], datatype=["number", "str", "str", "str"], value=[], interactive=False)
-        with gr.Column():
-            gr.Markdown("### 🏆 Hall of Fame Leaderboard")
-
-            # FEATURE UPDATE: Appended "Ties Summary" to the layout schema configurations list array matrix
-            leaderboard_table = gr.Dataframe(headers=["Challenger Name", "Wins Summary", "Ties Summary", "CPU Defeats", "Tournament Win Rate"], datatype=["str", "number", "number", "number", "str"], value=[], interactive=False)
-
-    btn_theme.click(fn=None, js="() => { document.body.classList.toggle('dark'); }")
-    btn_start_tourney.click(fn=start_tournament, inputs=[in_player_name, t_score_p, t_score_c, t_score_t], outputs=[tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, in_player_name, card_p, card_c, card_t, out_stats])
-    btn_reset.click(
-        fn=reset_and_unlock,
-        inputs=[
-            n_score_p, n_score_c, n_score_t, n_history_state,
-            t_score_p, t_score_c, t_score_t, t_history_state,
-            tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins
-        ],
-        outputs=[
-            out_player, out_cpu, out_result, out_stats,
-            tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins,
-            out_tourney_status, in_player_name,
-            card_p, card_c, card_t, history_table,
-            t_score_p, t_score_c, t_score_t, t_history_state
-        ]
-    )
-    btn_clear_data.click(fn=clear_all_data, inputs=[], outputs=[out_player, out_cpu, out_result, out_stats, card_p, card_c, card_t, history_table, n_history_state, t_history_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, in_player_name, leaderboard_table, leaderboard_state, normal_player_stats_state])
-
-    game_buttons = [(btn_rock, 1), (btn_paper, 2), (btn_scissors, 3), (btn_lizard, 4), (btn_spock, 5)]
-    for btn, choice_val in game_buttons:
-        btn.click(fn=play_round, inputs=[gr.State(choice_val), n_score_p, n_score_c, n_score_t, n_history_state, t_score_p, t_score_c, t_score_t, t_history_state, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, in_player_name, leaderboard_state, normal_player_stats_state], outputs=[out_player, out_cpu, out_result, out_stats, card_p, card_c, card_t, history_table, n_history_state, t_history_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, tourney_active_state, tourney_round_counter, tourney_p_wins, tourney_c_wins, out_tourney_status, leaderboard_table, leaderboard_state, normal_player_stats_state])
-
-    btn_save.click(fn=save_everything_to_file, inputs=[n_history_state, t_history_state, leaderboard_state, n_score_p, n_score_c, n_score_t, t_score_p, t_score_c, t_score_t, normal_player_stats_state], outputs=[download_file_target])
+                with gr.Column():
+                    l_r, l_p, l_s, l_l, l_k = gr.Button("🪨"), gr.Button("📄"), gr.Button("✂️"), gr.Button("🦎"), gr.Button("🖖")
+                with gr.Column():
+                    out_res = gr.Textbox(label="Result")
+                    
+            def play_local(move):
+                c_move = random.randint(1,5)
+                if move == c_move: return f"Tie! Both chose {CHOICES[move]}"
+                elif (move, c_move) in ACTION_PHRASES: return f"You Win! {ACTION_PHRASES[(move, c_move)]}"
+                else: return f"CPU Wins! {ACTION_PHRASES[(c_move, move)]}"
+                
+            for btn, val in [(l_r, 1), (l_p, 2), (l_s, 3), (l_l, 4), (l_k, 5)]:
+                btn.click(play_local, inputs=[gr.State(val)], outputs=out_res)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=port,
-        ssr_mode=False,
-        theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo")
-    )
-    
+    demo.launch(server_name="0.0.0.0", server_port=port)
