@@ -50,7 +50,21 @@ def resolve_matchup(m1, m2):
     return "P2"
 
 # ==========================================
-# 3. TOURNAMENT BRACKET ENGINE
+# 3. GLOBAL LEADERBOARD LOGIC
+# ==========================================
+def update_global_leaderboard(champ_name, mode, lobby_size):
+    lb_str = redis_client.get("RG_GLOBAL_LEADERBOARD")
+    lb = json.loads(lb_str) if lb_str else []
+    lb.append([champ_name, mode, lobby_size, "🏆 Champion"])
+    redis_client.set("RG_GLOBAL_LEADERBOARD", json.dumps(lb))
+
+def get_leaderboard_df():
+    lb_str = redis_client.get("RG_GLOBAL_LEADERBOARD")
+    lb = json.loads(lb_str) if lb_str else []
+    return pd.DataFrame(lb, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
+
+# ==========================================
+# 4. TOURNAMENT BRACKET ENGINE
 # ==========================================
 def generate_bracket(players):
     p_ids = list(players.keys())
@@ -86,13 +100,9 @@ def advance_tournament(room, room_code):
         room["status"] = "finished"
         room["champion"] = winners[0]
         
-        # Update Leaderboard Data
         if room["mode"] != "Casual 1v1":
              champ_name = room["players"][winners[0]]["name"]
-             # If you wanted to do global leaderboard, you'd save it to another Redis key here.
-             # We'll stick to displaying session info.
-             room["leaderboard"].append([champ_name, "1st Place", room["mode"]])
-             
+             update_global_leaderboard(champ_name, room["mode"], len(room["players"]))
         return
     
     new_matches = []
@@ -107,7 +117,7 @@ def advance_tournament(room, room_code):
     room["round"] += 1
 
 # ==========================================
-# 4. ONLINE LOBBY FUNCTIONS
+# 5. ONLINE LOBBY FUNCTIONS
 # ==========================================
 def host_room(client_id, player_name, mode, best_of):
     if not player_name.strip(): player_name = "Host"
@@ -123,8 +133,7 @@ def host_room(client_id, player_name, mode, best_of):
         "bracket": [],
         "round": 1,
         "log": [],
-        "leaderboard": [],
-        "all_match_logs": [] # Store all moves for the Excel export
+        "all_match_logs": [] 
     }
     save_room(code, room_data)
     return code, gr.update(visible=False), gr.update(visible=True)
@@ -136,7 +145,7 @@ def join_room(client_id, player_name, room_code):
     if not room: return "❌ Room not found.", gr.update(), gr.update()
     if room["status"] != "lobby": return "❌ Game already in progress.", gr.update(), gr.update()
     if room["mode"] == "Casual 1v1" and len(room["players"]) >= 2: return "❌ Casual room is full.", gr.update(), gr.update()
-    if len(room["players"]) >= 16: return "❌ Tournament is at max capacity (16).", gr.update(), gr.update()
+    if len(room["players"]) >= 16: return "❌ Tournament is at max capacity.", gr.update(), gr.update()
         
     room["players"][client_id] = {"name": player_name if player_name.strip() else "Guest"}
     save_room(code, room)
@@ -145,36 +154,31 @@ def join_room(client_id, player_name, room_code):
 def start_game(client_id, room_code):
     room = get_room(room_code)
     if not room or room["host"] != client_id or len(room["players"]) < 2: return
-    
     room["status"] = "playing"
     room["bracket"] = generate_bracket(room["players"])
     save_room(room_code, room)
 
 # ==========================================
-# 5. EXCEL EXPORT FUNCTION
+# 6. EXCEL EXPORT FUNCTION
 # ==========================================
 def export_tournament_data(room_code):
     room = get_room(room_code)
-    if not room or room["status"] != "finished": 
-        return None
+    if not room: return None
         
-    log_data = room.get("all_match_logs", [])
-    df_logs = pd.DataFrame(log_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
-    
-    lb_data = room.get("leaderboard", [])
-    df_lb = pd.DataFrame(lb_data, columns=["Player", "Placement", "Mode"])
+    df_logs = pd.DataFrame(room.get("all_match_logs", []), columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+    df_lb = get_leaderboard_df()
 
     temp_dir = tempfile.gettempdir()
-    file_path = os.path.join(temp_dir, f"rpsls_tournament_{room_code}.xlsx")
+    file_path = os.path.join(temp_dir, f"rpsls_tournament_stats.xlsx")
     
     with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-         df_lb.to_excel(writer, sheet_name="Leaderboard", index=False)
-         df_logs.to_excel(writer, sheet_name="Match Logs", index=False)
+         df_lb.to_excel(writer, sheet_name="Global Leaderboard", index=False)
+         df_logs.to_excel(writer, sheet_name="Match History Logs", index=False)
          
     return file_path
 
 # ==========================================
-# 6. ONLINE GAMEPLAY LOGIC
+# 7. ONLINE GAMEPLAY LOGIC
 # ==========================================
 def make_move_online(client_id, room_code, move):
     room = get_room(room_code)
@@ -201,7 +205,7 @@ def make_move_online(client_id, room_code, move):
             else: stats["t"] += 1
             
             p_name = room["players"][client_id]["name"]
-            room["all_match_logs"].append([room["round"], p_name, CHOICES[move], "CPU", CHOICES[cpu_move], res])
+            room["all_match_logs"].insert(0, [room["round"], p_name, CHOICES[move], "CPU", CHOICES[cpu_move], res])
             
             if match["p1_pvc_stats"]["played"] == 10 and match["p2_pvc_stats"]["played"] == 10:
                 s1, s2 = match["p1_pvc_stats"], match["p2_pvc_stats"]
@@ -220,16 +224,10 @@ def make_move_online(client_id, room_code, move):
             p1_name, p2_name = room["players"][match["p1"]]["name"], room["players"][match["p2"]]["name"]
             m1_name, m2_name = CHOICES[match["p1_move"]], CHOICES[match["p2_move"]]
             
-            room["all_match_logs"].append([room["round"], p1_name, m1_name, p2_name, m2_name, res])
+            room["all_match_logs"].insert(0, [room["round"], p1_name, m1_name, p2_name, m2_name, res])
 
-            if res == "P1": 
-                match["p1_score"] += 1
-                room["log"].insert(0, f"{p1_name} won round! {m1_name} vs {m2_name}")
-            elif res == "P2": 
-                match["p2_score"] += 1
-                room["log"].insert(0, f"{p2_name} won round! {m2_name} vs {m1_name}")
-            else:
-                room["log"].insert(0, f"Tie! Both chose {m1_name}")
+            if res == "P1": match["p1_score"] += 1
+            elif res == "P2": match["p2_score"] += 1
                 
             match["p1_move"], match["p2_move"] = None, None
             
@@ -241,32 +239,42 @@ def make_move_online(client_id, room_code, move):
     save_room(room_code, room)
 
 # ==========================================
-# 7. UI SYNCHRONIZATION (Polling from Redis)
+# 8. UI SYNCHRONIZATION (Polling from Redis)
 # ==========================================
+# We define these globally to prevent Gradio from crashing on empty dataframes
+empty_bracket = pd.DataFrame(columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
+empty_lb = pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
+empty_logs = pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+
 def sync_ui(client_id, room_code):
+    # Fetch global leaderboard instantly
+    lb_df = get_leaderboard_df()
+    if lb_df.empty: lb_df = empty_lb
+
     if not room_code: 
-        return gr.update(value="Not in a room"), "", pd.DataFrame(), pd.DataFrame(), gr.update(visible=False)
+        return "<h3>Insert Coin to Begin</h3>", "Waiting...", empty_bracket, lb_df, empty_logs, gr.update(visible=False)
     
     room = get_room(room_code)
     if not room: 
-        return gr.update(value="Room closed or expired"), "", pd.DataFrame(), pd.DataFrame(), gr.update(visible=False)
+        return "<h3>Room closed or expired</h3>", "Waiting...", empty_bracket, lb_df, empty_logs, gr.update(visible=False)
     
     players_list = ", ".join([p["name"] for p in room["players"].values()])
     
-    # Send leaderboard data if available
-    lb_df = pd.DataFrame(room.get("leaderboard", []), columns=["Player", "Placement", "Mode"])
+    # Process Room Match Logs for display
+    logs_df = pd.DataFrame(room.get("all_match_logs", []), columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+    if logs_df.empty: logs_df = empty_logs
     
     if room["status"] == "lobby":
         html = f"<h3>Room: {room_code} | Mode: {room['mode']}</h3><p>Players ({len(room['players'])}): {players_list}</p>"
         if room["host"] == client_id: html += "<p><em>You are host. Click Start when ready!</em></p>"
-        return html, "Waiting in lobby...", pd.DataFrame(), lb_df, gr.update(visible=False)
+        return html, "Waiting in lobby...", empty_bracket, lb_df, logs_df, gr.update(visible=False)
         
     if room["status"] == "finished":
         champ_name = room["players"][room["champion"]]["name"]
         export_btn_state = gr.update(visible=True) if room["host"] == client_id else gr.update(visible=False)
-        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", pd.DataFrame(), lb_df, export_btn_state
+        return f"<h2>🏆 TOURNAMENT OVER!</h2><h3>Champion: {champ_name}</h3>", "Game Over", empty_bracket, lb_df, logs_df, export_btn_state
 
-    html = f"<h3>🕹️ Round {room['round']} | {room['mode']}</h3>"
+    html = f"<h3>🕹️ Live Round: {room['round']} | {room['mode']}</h3>"
     status = "Waiting..."
     bracket_data = []
     my_match = None
@@ -299,35 +307,47 @@ def sync_ui(client_id, room_code):
                 else: status = "⏳ Waiting for opponent to move..."
 
     if not my_match: status = "You have a Bye, or you were eliminated. Spectating..."
-    df = pd.DataFrame(bracket_data, columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
+    df_bracket = pd.DataFrame(bracket_data, columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
+    if df_bracket.empty: df_bracket = empty_bracket
     
-    return html, status, df, lb_df, gr.update(visible=False)
+    return html, status, df_bracket, lb_df, logs_df, gr.update(visible=False)
 
 # ==========================================
-# 8. GRADIO UI LAYOUT (Single Page Arcade Theme)
+# 9. GRADIO UI LAYOUT (Safe Arcade Theme)
 # ==========================================
 
-# Custom CSS for Arcade Feel
+# SAFE custom CSS that styles the layout without destroying Gradio's internal boxes
 custom_css = """
-body { background-color: #1a1a2e; color: #fff; font-family: 'Courier New', Courier, monospace; }
-.gradio-container { border: 4px solid #e94560; border-radius: 10px; padding: 20px; box-shadow: 0 0 20px #e94560; }
-h1, h2, h3 { color: #0f3460; text-shadow: 2px 2px #e94560; text-align: center; }
-.dark body { background-color: #000; }
-.dark .gradio-container { border-color: #0f3460; box-shadow: 0 0 20px #0f3460; }
-.dark h1, .dark h2, .dark h3 { color: #e94560; text-shadow: 2px 2px #0f3460; }
+.gradio-container {
+    border: 3px solid #ff00ff !important;
+    box-shadow: 0px 0px 15px #ff00ff !important;
+    border-radius: 12px !important;
+}
+h1, h2, h3 {
+    font-family: 'Courier New', Courier, monospace !important;
+    text-transform: uppercase;
+    color: #9333ea !important;
+}
+.dark .gradio-container {
+    border: 3px solid #00ffff !important;
+    box-shadow: 0px 0px 15px #00ffff !important;
+}
+.dark h1, .dark h2, .dark h3 {
+    color: #00ffff !important;
+}
 """
 
-with gr.Blocks(theme=gr.themes.Monochrome(), css=custom_css) as demo:
+with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple"), css=custom_css) as demo:
     client_id = gr.State(lambda: str(uuid.uuid4()))
     active_room = gr.State("")
 
     with gr.Row():
-        gr.Markdown("# 🕹️ RPSLS Arcade Arena 🕹️")
+        gr.Markdown("# 🕹️ RPSLS ARCADE ARENA 🕹️")
         btn_theme = gr.Button("🌓 Toggle Dark Mode", variant="secondary")
 
-    # ONE TAB FOR EVERYTHING
+    # ALL FEATURES MERGED INTO ONE PAGE
     with gr.Column(visible=True) as screen_setup:
-        gr.Markdown("### Welcome Player! Insert Coin to Begin.")
+        gr.Markdown("### Welcome Player! Setup your match.")
         my_name = gr.Textbox(label="Player Name", value="Player 1")
         
         with gr.Row():
@@ -341,6 +361,10 @@ with gr.Blocks(theme=gr.themes.Monochrome(), css=custom_css) as demo:
                 join_code = gr.Textbox(label="Enter Room Code")
                 btn_join = gr.Button("JOIN ROOM")
                 sys_msg = gr.Markdown("")
+                
+        # Leaderboard displayed on the front page before joining a game
+        gr.Markdown("### 🏆 Global Tournament Hall of Fame")
+        lb_view_setup = gr.Dataframe(headers=["Champion Name", "Tournament Mode", "Lobby Size", "Status"], interactive=False)
 
     with gr.Column(visible=False) as screen_game:
         top_banner = gr.HTML("Loading Arcade Data...")
@@ -352,20 +376,21 @@ with gr.Blocks(theme=gr.themes.Monochrome(), css=custom_css) as demo:
                 with gr.Row():
                     btn_r, btn_p, btn_s, btn_l, btn_k = [gr.Button("🪨"), gr.Button("📄"), gr.Button("✂️"), gr.Button("🦎"), gr.Button("🖖")]
                 
-                gr.Markdown("### 🏆 Leaderboard")
-                lb_view = gr.Dataframe(headers=["Player", "Placement", "Mode"], interactive=False)
-                
-                btn_export = gr.Button("💾 Export Tournament Data (Host Only)", visible=False, variant="secondary")
-                download_file = gr.File(label="Download Excel", interactive=False, visible=False)
+                # Excel Export Buttons
+                btn_export = gr.Button("💾 Export Full Analytics to Excel (Host)", visible=False, variant="secondary")
+                download_file = gr.File(label="Download Excel Document", interactive=False, visible=False)
 
             with gr.Column(scale=2):
-                gr.Markdown("### 📡 Live Bracket")
+                gr.Markdown("### 📡 Live Match Bracket")
                 bracket_view = gr.Dataframe(headers=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"], interactive=False)
+                
+                gr.Markdown("### 🕒 Live Round Tracking History")
+                history_view = gr.Dataframe(headers=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"], interactive=False)
 
     timer = gr.Timer(value=1)
     
     # Event Handlers
-    btn_theme.click(fn=None, js="() => { document.body.classList.toggle('dark'); }")
+    btn_theme.click(fn=None, js="() => { document.body.classList.toggle('dark'); document.documentElement.classList.toggle('dark'); }")
     
     btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, screen_setup, screen_game])
     btn_join.click(join_room, inputs=[client_id, my_name, join_code], outputs=[sys_msg, screen_setup, screen_game]).then(
@@ -373,8 +398,8 @@ with gr.Blocks(theme=gr.themes.Monochrome(), css=custom_css) as demo:
     )
     btn_start.click(start_game, inputs=[client_id, active_room], outputs=[])
     
-    # Sync UI updates the bracket, leaderboard, and toggles export button visibility
-    timer.tick(sync_ui, inputs=[client_id, active_room], outputs=[top_banner, match_status, bracket_view, lb_view, btn_export])
+    # Sync UI updates the bracket, leaderboard, history tracker, and toggles export button visibility
+    timer.tick(sync_ui, inputs=[client_id, active_room], outputs=[top_banner, match_status, bracket_view, lb_view_setup, history_view, btn_export])
     
     for btn, val in [(btn_r, 1), (btn_p, 2), (btn_s, 3), (btn_l, 4), (btn_k, 5)]:
         btn.click(make_move_online, inputs=[client_id, active_room, gr.State(val)], outputs=[])
