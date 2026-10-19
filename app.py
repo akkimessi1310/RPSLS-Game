@@ -63,7 +63,8 @@ def update_global_leaderboard(champ_name, mode, lobby_size):
     try:
         lb_str = redis_client.get("RG_GLOBAL_LEADERBOARD")
         lb = json.loads(lb_str) if lb_str else []
-        lb.insert(0, [champ_name, mode, lobby_size, "🏆 Champion"])
+        # Uses explicit append instead of insert to guarantee every win logs
+        lb.append([champ_name, mode, lobby_size, "🏆 Champion"])
         redis_client.set("RG_GLOBAL_LEADERBOARD", json.dumps(lb))
     except: pass
 
@@ -85,7 +86,9 @@ def update_offline_leaderboards(player_name, p_wins, c_wins, ties):
 def get_leaderboard_data():
     try:
         data = redis_client.get("RG_GLOBAL_LEADERBOARD")
-        return json.loads(data) if data else []
+        lb = json.loads(data) if data else []
+        # Reverses the array so newest wins are always at the top
+        return lb[::-1]
     except: return []
 
 def get_offline_hof_data():
@@ -105,10 +108,7 @@ def get_offline_lb_data():
 # ==========================================
 def generate_bracket(players, shuffle=True):
     p_ids = list(players.keys())
-    
-    # Randomizer toggled off for Casual 1v1 to maintain Host = P1
-    if shuffle:
-        random.shuffle(p_ids)
+    if shuffle: random.shuffle(p_ids)
     
     n = len(p_ids)
     next_power_of_2 = 2 ** math.ceil(math.log2(n)) if n > 0 else 0
@@ -188,11 +188,8 @@ def start_game(client_id, room_code):
         room = get_room(room_code)
         if not room or room["host"] != client_id or len(room["players"]) < 2: return
         room["status"] = "playing"
-        
-        # Only shuffle if it's an actual tournament
         should_shuffle = (room["mode"] != "Casual 1v1")
         room["bracket"] = generate_bracket(room["players"], shuffle=should_shuffle)
-        
         save_room(room_code, room)
     except: pass
 
@@ -419,7 +416,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     client_id = gr.State(lambda: str(uuid.uuid4()))
     active_room = gr.State("")
     
-    # Offline States
     off_w, off_c, off_t, off_log = gr.State(0), gr.State(0), gr.State(0), gr.State([])
     off_t_active, off_t_round = gr.State(False), gr.State(1)
     off_t_p, off_t_c, off_t_ties = gr.State(0), gr.State(0), gr.State(0)
