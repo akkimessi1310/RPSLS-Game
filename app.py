@@ -21,12 +21,21 @@ ACTION_PHRASES = {
 }
 
 # ==========================================
-# 2. REDIS DATABASE (ONLINE MULTIPLAYER)
+# 2. AUTO-SANITIZED REDIS DATABASE CONNECTION
 # ==========================================
-redis_client = Redis(
-    url=os.environ.get("UPSTASH_REDIS_REST_URL", ""),
-    token=os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
-)
+# Safely fetch environment variables with dummy fallbacks to prevent startup crashes
+RAW_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "https://dummy.upstash.io")
+RAW_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "dummy")
+
+# Automatically strip accidental quotes or whitespaces from dashboard copy-pasting
+CLEAN_URL = RAW_URL.strip().strip('"').strip("'")
+CLEAN_TOKEN = RAW_TOKEN.strip().strip('"').strip("'")
+
+# Auto-inject https:// protocol if it is missing
+if not CLEAN_URL.startswith("http"):
+    CLEAN_URL = "https://" + CLEAN_URL
+
+redis_client = Redis(url=CLEAN_URL, token=CLEAN_TOKEN)
 
 def get_room(room_code):
     try:
@@ -119,7 +128,6 @@ def advance_tournament(room):
     room["bracket"] = new_matches
     room["round"] += 1
 
-# --- CRASH CATCHING IMPLEMENTED HERE ---
 def host_room(client_id, player_name, mode, best_of):
     try:
         if not player_name or not str(player_name).strip(): 
@@ -223,7 +231,7 @@ def make_move_online(client_id, room_code, move):
         save_room(room_code, room)
     except: pass
 
-# --- STRICT PANDAS DATAFRAMES ENFORCED HERE ---
+# --- STRICT PANDAS DATAFRAMES ENFORCED ---
 df_empty_bracket = pd.DataFrame(columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
 df_empty_history = pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
 df_empty_lb = pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
@@ -337,14 +345,14 @@ def export_all_data(room_code, offline_log):
         df_off.to_excel(writer, sheet_name="Offline Practice Logs", index=False)
         
         lb_data = get_leaderboard_data()
-        df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if lb_data else df_empty_lb
+        df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if lb_data else pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
         df_lb.to_excel(writer, sheet_name="Global Leaderboard", index=False)
         
         if room_code:
             room = get_room(room_code)
             if room:
                 logs_data = room.get("all_match_logs", [])
-                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
+                df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
                 df_on.to_excel(writer, sheet_name="Online Tournament Logs", index=False)
                 
     return file_path
@@ -377,8 +385,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
                 gr.Markdown("#### 🔌 JOIN GAME")
                 join_code = gr.Textbox(label="Enter Room Code")
                 btn_join = gr.Button("JOIN ROOM")
-        
-        # DYNAMIC SYSTEM MESSAGE ADDED HERE TO SHOW DATABASE ERRORS
         sys_msg = gr.Markdown("")
 
     with gr.Column(visible=False) as screen_game:
@@ -431,7 +437,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     demo.load(load_leaderboard_once, inputs=[], outputs=[lb_view_setup])
     btn_refresh_lb.click(load_leaderboard_once, inputs=[], outputs=[lb_view_setup])
     
-    # UNIFIED UI SYNC UPDATES WITH ERROR CATCHING
     btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, sys_msg, screen_setup, screen_game])
     btn_join.click(join_room, inputs=[client_id, my_name, join_code], outputs=[active_room, sys_msg, screen_setup, screen_game])
     
