@@ -78,7 +78,6 @@ def update_offline_leaderboards(player_name, p_wins, c_wins, ties):
             lb_str = redis_client.get("RG_OFFLINE_LEADERBOARD")
             lb = json.loads(lb_str) if lb_str else []
             lb.append([player_name, p_wins, c_wins, ties, f"{(p_wins/10)*100:.0f}%"])
-            # Auto-sort by Wins (Descending), then Ties (Descending), then Name (A-Z)
             lb = sorted(lb, key=lambda x: (-x[1], -x[3], str(x[0]).lower()))
             redis_client.set("RG_OFFLINE_LEADERBOARD", json.dumps(lb))
     except: pass
@@ -104,9 +103,12 @@ def get_offline_lb_data():
 # ==========================================
 # 3. ONLINE ENGINE (BRACKET & LOBBY)
 # ==========================================
-def generate_bracket(players):
+def generate_bracket(players, shuffle=True):
     p_ids = list(players.keys())
-    random.shuffle(p_ids)
+    
+    # Randomizer toggled off for Casual 1v1 to maintain Host = P1
+    if shuffle:
+        random.shuffle(p_ids)
     
     n = len(p_ids)
     next_power_of_2 = 2 ** math.ceil(math.log2(n)) if n > 0 else 0
@@ -132,8 +134,6 @@ def advance_tournament(room):
     if len(winners) == 1:
         room["status"] = "finished"
         room["champion"] = winners[0]
-        
-        # Now adds ALL modes (including Casual 1v1) to Global Leaderboard
         champ_name = room["players"][winners[0]]["name"]
         update_global_leaderboard(champ_name, room["mode"], len(room["players"]))
         return
@@ -188,7 +188,11 @@ def start_game(client_id, room_code):
         room = get_room(room_code)
         if not room or room["host"] != client_id or len(room["players"]) < 2: return
         room["status"] = "playing"
-        room["bracket"] = generate_bracket(room["players"])
+        
+        # Only shuffle if it's an actual tournament
+        should_shuffle = (room["mode"] != "Casual 1v1")
+        room["bracket"] = generate_bracket(room["players"], shuffle=should_shuffle)
+        
         save_room(room_code, room)
     except: pass
 
@@ -360,7 +364,6 @@ def play_offline_round(move, n_wins, n_losses, n_ties, match_log, player_name, t
             elif t_c_wins > t_p_wins: status = f"💀 TOURNAMENT OVER! CPU WINS {t_c_wins}-{t_p_wins}!"
             else: status = f"⚖️ TOURNAMENT OVER! IT'S A DRAW {t_p_wins}-{t_c_wins}!"
             
-            # Send results to proper offline leaderboard array in Redis
             update_offline_leaderboards(player_name, t_p_wins, t_c_wins, t_ties)
             t_active = False
 
@@ -379,7 +382,7 @@ def hard_reset_all():
     )
 
 # ==========================================
-# 5. UNIVERSAL EXCEL EXPORT (Updated with 5 Sheets)
+# 5. UNIVERSAL EXCEL EXPORT
 # ==========================================
 def export_all_data(room_code, offline_log):
     temp_dir = tempfile.gettempdir()
@@ -410,12 +413,13 @@ def export_all_data(room_code, offline_log):
     return file_path
 
 # ==========================================
-# 6. GRADIO UI LAYOUT (Flat Page Architecture)
+# 6. GRADIO UI LAYOUT
 # ==========================================
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     client_id = gr.State(lambda: str(uuid.uuid4()))
     active_room = gr.State("")
     
+    # Offline States
     off_w, off_c, off_t, off_log = gr.State(0), gr.State(0), gr.State(0), gr.State([])
     off_t_active, off_t_round = gr.State(False), gr.State(1)
     off_t_p, off_t_c, off_t_ties = gr.State(0), gr.State(0), gr.State(0)
@@ -483,7 +487,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
 
     gr.Markdown("---")
     gr.Markdown("## 🏆 HALL OF FAME & LEADERBOARDS")
-    
     btn_refresh_lb = gr.Button("🔄 Refresh All Leaderboards")
     
     with gr.Accordion("🌐 Online Global Hall of Fame (All Modes)", open=True):
