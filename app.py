@@ -63,7 +63,6 @@ def update_global_leaderboard(champ_name, mode, lobby_size):
     try:
         lb_str = redis_client.get("RG_GLOBAL_LEADERBOARD")
         lb = json.loads(lb_str) if lb_str else []
-        # Uses explicit append instead of insert to guarantee every win logs
         lb.append([champ_name, mode, lobby_size, "🏆 Champion"])
         redis_client.set("RG_GLOBAL_LEADERBOARD", json.dumps(lb))
     except: pass
@@ -87,7 +86,6 @@ def get_leaderboard_data():
     try:
         data = redis_client.get("RG_GLOBAL_LEADERBOARD")
         lb = json.loads(data) if data else []
-        # Reverses the array so newest wins are always at the top
         return lb[::-1]
     except: return []
 
@@ -102,6 +100,14 @@ def get_offline_lb_data():
         data = redis_client.get("RG_OFFLINE_LEADERBOARD")
         return json.loads(data) if data else []
     except: return []
+
+def wipe_all_leaderboards():
+    try:
+        redis_client.delete("RG_GLOBAL_LEADERBOARD")
+        redis_client.delete("RG_OFFLINE_HOF")
+        redis_client.delete("RG_OFFLINE_LEADERBOARD")
+    except: pass
+    return load_all_leaderboards_once()
 
 # ==========================================
 # 3. ONLINE ENGINE (BRACKET & LOBBY)
@@ -410,7 +416,7 @@ def export_all_data(room_code, offline_log):
     return file_path
 
 # ==========================================
-# 6. GRADIO UI LAYOUT
+# 6. GRADIO UI LAYOUT (Flat Page Architecture)
 # ==========================================
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     client_id = gr.State(lambda: str(uuid.uuid4()))
@@ -483,7 +489,10 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
 
     gr.Markdown("---")
     gr.Markdown("## 🏆 HALL OF FAME & LEADERBOARDS")
-    btn_refresh_lb = gr.Button("🔄 Refresh All Leaderboards")
+    
+    with gr.Row():
+        btn_refresh_lb = gr.Button("🔄 Refresh All Leaderboards", variant="primary")
+        btn_wipe_lb = gr.Button("🗑️ Wipe Global Leaderboards", variant="stop")
     
     with gr.Accordion("🌐 Online Global Hall of Fame (All Modes)", open=True):
         lb_view_setup = gr.Dataframe(headers=["Champion Name", "Tournament Mode", "Lobby Size", "Status"], interactive=False)
@@ -502,7 +511,9 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     timer = gr.Timer(value=1)
     btn_theme.click(fn=None, js="() => { document.documentElement.classList.toggle('dark'); }")
     demo.load(load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
+    
     btn_refresh_lb.click(load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
+    btn_wipe_lb.click(wipe_all_leaderboards, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
     
     # Online
     btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, sys_msg, screen_setup, screen_game])
