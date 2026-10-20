@@ -101,7 +101,6 @@ def get_offline_lb_data():
         return json.loads(data) if data else []
     except: return []
 
-# --- NEW: GLOBAL MATCH LOG TRACKING ---
 def append_global_match_log(round_num, p1, m1, p2, m2, res):
     try:
         log_str = redis_client.get("RG_GLOBAL_MATCH_LOGS")
@@ -438,7 +437,14 @@ def export_all_data(offline_log):
     return file_path
 
 # ==========================================
-# 6. GRADIO UI LAYOUT (Flat Page Architecture)
+# 6. UI HELPER FUNCTION (DYNAMIC MATCH LENGTH)
+# ==========================================
+def toggle_match_length(mode):
+    if mode == "PvC Tournament (10 Rounds)": return gr.update(visible=False)
+    return gr.update(visible=True)
+
+# ==========================================
+# 7. GRADIO UI LAYOUT (Flat Page Architecture)
 # ==========================================
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     client_id = gr.State(lambda: str(uuid.uuid4()))
@@ -455,6 +461,23 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
         
     gr.Markdown("### Welcome! Enter your name below to play Online or Offline.")
     my_name = gr.Textbox(label="Player Name", value="Player 1")
+
+    # --- NEW: RULES SECTION ---
+    with gr.Accordion("📜 Game Rules & Modes Explained (Click to Expand)", open=False):
+        gr.Markdown("""
+        **THE RULES OF COMBAT:**
+        * ✂️ **Scissors** cuts **Paper** and decapitates **Lizard**
+        * 📄 **Paper** covers **Rock** and disproves **Spock**
+        * 🪨 **Rock** crushes **Scissors** and crushes **Lizard**
+        * 🦎 **Lizard** poisons **Spock** and eats **Paper**
+        * 🖖 **Spock** smashes **Scissors** and vaporizes **Rock**
+        
+        **GAME MODES:**
+        * **Casual 1v1:** Play a standard Best-of-3 or Best-of-5 match against a friend online.
+        * **PvP Tournament:** A bracket-style elimination tournament for 3 to 16 players. Players without an opponent get an automatic "Bye" to the next round.
+        * **PvC Tournament:** Compete against your friends online by playing against the CPU! Whoever wins the most out of 10 rounds against the computer advances in the bracket.
+        * **Offline Practice:** Test your skills locally against the CPU to hone your strategy.
+        """)
 
     gr.Markdown("---")
     gr.Markdown("## 🌐 ONLINE MULTIPLAYER")
@@ -488,7 +511,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
         
         gr.Markdown("### 🕒 Online Match History Tracking")
         history_view = gr.Dataframe(headers=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"], interactive=False)
-        btn_export_online = gr.Button("💾 Host: Unlock Full Data Export", visible=False, variant="primary")
 
     gr.Markdown("---")
     gr.Markdown("## 🤖 OFFLINE PRACTICE")
@@ -534,6 +556,9 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     btn_theme.click(fn=None, js="() => { document.documentElement.classList.toggle('dark'); }")
     demo.load(load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
     
+    # Hide Match Length button dynamically if PvC Tournament is selected
+    host_mode.change(toggle_match_length, inputs=[host_mode], outputs=[host_bo])
+    
     btn_refresh_lb.click(load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
     btn_wipe_lb.click(wipe_all_leaderboards, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
     
@@ -542,7 +567,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     btn_join.click(join_room, inputs=[client_id, my_name, join_code], outputs=[active_room, sys_msg, screen_setup, screen_game])
     btn_start.click(start_game, inputs=[client_id, active_room], outputs=[])
     btn_leave.click(leave_online_room, inputs=[], outputs=[active_room, screen_setup, screen_game])
-    timer.tick(sync_ui, inputs=[client_id, active_room], outputs=[top_banner, match_status, bracket_view, history_view, btn_export_online])
+    timer.tick(sync_ui, inputs=[client_id, active_room], outputs=[top_banner, match_status, bracket_view, history_view])
     
     for btn, val in [(btn_r, 1), (btn_p, 2), (btn_s, 3), (btn_l, 4), (btn_k, 5)]:
         btn.click(make_move_online, inputs=[client_id, active_room, gr.State(val)], outputs=[])
@@ -557,6 +582,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
 
     # Resets & Exports
     btn_hard_reset.click(hard_reset_all, inputs=[], outputs=[active_room, screen_setup, screen_game, off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_log, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_tourney_status])
+    
     btn_export_all.click(export_all_data, inputs=[off_log], outputs=[download_file]).then(lambda: gr.update(visible=True), outputs=[download_file])
 
 if __name__ == "__main__":
