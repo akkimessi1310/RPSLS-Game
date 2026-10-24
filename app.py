@@ -155,13 +155,13 @@ def generate_bracket(players, shuffle=True):
     
     matches = []
     for i in range(0, first_round_players, 2):
-        matches.append({"p1": p_ids[i], "p2": p_ids[i+1], "p1_score": 0, "p2_score": 0, 
+        matches.append({"p1": p_ids[i], "p2": p_ids[i+1], "p1_score": 0, "p2_score": 0, "ties": 0,
                         "rounds_played": 0,
                         "p1_move": None, "p2_move": None, "winner": None,
                         "p1_pvc_stats": {"w":0, "l":0, "t":0, "played":0}, 
                         "p2_pvc_stats": {"w":0, "l":0, "t":0, "played":0}})
     for i in range(first_round_players, n):
-        matches.append({"p1": p_ids[i], "p2": None, "p1_score": 1, "p2_score": 0, 
+        matches.append({"p1": p_ids[i], "p2": None, "p1_score": 1, "p2_score": 0, "ties": 0,
                         "rounds_played": 0,
                         "p1_move": None, "p2_move": None, "winner": p_ids[i]})
     return matches
@@ -181,7 +181,7 @@ def advance_tournament(room):
     new_matches = []
     for i in range(0, len(winners), 2):
         new_matches.append({
-            "p1": winners[i], "p2": winners[i+1], "p1_score": 0, "p2_score": 0, 
+            "p1": winners[i], "p2": winners[i+1], "p1_score": 0, "p2_score": 0, "ties": 0,
             "rounds_played": 0,
             "p1_move": None, "p2_move": None, "winner": None,
             "p1_pvc_stats": {"w":0, "l":0, "t":0, "played":0}, 
@@ -282,6 +282,7 @@ def make_move_online(client_id, room_code, move):
                 
                 if res == "P1": match["p1_score"] += 1
                 elif res == "P2": match["p2_score"] += 1
+                else: match["ties"] = match.get("ties", 0) + 1
                     
                 match["p1_move"], match["p2_move"] = None, None
                 if match["p1_score"] == room["target_score"]: match["winner"] = match["p1"]
@@ -348,8 +349,8 @@ def sync_ui(client_id, room_code):
         m_stat = "Finished" if m["winner"] else "Playing"
         
         if room["mode"] == "PvC Tournament (10 Rounds)":
-            p1_inf = f"{m['p1_pvc_stats']['w']}W-{m['p1_pvc_stats']['l']}L (Round {m['p1_pvc_stats']['played']}/10)"
-            p2_inf = f"{m['p2_pvc_stats']['w']}W-{m['p2_pvc_stats']['l']}L (Round {m['p2_pvc_stats']['played']}/10)" if m["p2"] else "-"
+            p1_inf = f"{m['p1_pvc_stats']['w']}W-{m['p1_pvc_stats']['l']}L-{m['p1_pvc_stats']['t']}T (Rd {m['p1_pvc_stats']['played']}/10)"
+            p2_inf = f"{m['p2_pvc_stats']['w']}W-{m['p2_pvc_stats']['l']}L-{m['p2_pvc_stats']['t']}T (Rd {m['p2_pvc_stats']['played']}/10)" if m["p2"] else "-"
             bracket_data.append([p1n, p1_inf, "vs", p2n, p2_inf, m_stat])
             
             if not m["winner"] and (m["p1"] == client_id or m["p2"] == client_id):
@@ -359,7 +360,10 @@ def sync_ui(client_id, room_code):
                 if played < 10: status = f"🎮 Your Turn: Play CPU! (Round {played+1}/10)"
                 else: status = "Finished your 10 rounds. Waiting for opponent..."
         else:
-            bracket_data.append([p1n, m["p1_score"], "vs", p2n, m["p2_score"] if m["p2"] else "-", m_stat])
+            ties_count = m.get("ties", 0)
+            p1_inf = f"{m['p1_score']}W-{m['p2_score']}L-{ties_count}T" if m["p2"] else "1W-0L-0T (BYE)"
+            p2_inf = f"{m['p2_score']}W-{m['p1_score']}L-{ties_count}T" if m["p2"] else "-"
+            bracket_data.append([p1n, p1_inf, "vs", p2n, p2_inf, m_stat])
             
             if not m["winner"] and (m["p1"] == client_id or m["p2"] == client_id):
                 my_match = m
@@ -383,8 +387,8 @@ def format_offline_bracket(pvc_state):
         p1n = m["p1"]
         p2n = m["p2"] if m["p2"] else "BYE"
         m_stat = f"Winner: {m['winner']}" if m["winner"] else "Playing"
-        p1_inf = f"{m['p1_stats']['w']}W-{m['p1_stats']['l']}L (Rd {m['p1_stats']['played']}/10)"
-        p2_inf = f"{m['p2_stats']['w']}W-{m['p2_stats']['l']}L (Rd {m['p2_stats']['played']}/10)" if m["p2"] else "-"
+        p1_inf = f"{m['p1_stats']['w']}W-{m['p1_stats']['l']}L-{m['p1_stats']['t']}T (Rd {m['p1_stats']['played']}/10)"
+        p2_inf = f"{m['p2_stats']['w']}W-{m['p2_stats']['l']}L-{m['p2_stats']['t']}T (Rd {m['p2_stats']['played']}/10)" if m["p2"] else "-"
         rows.append([p1n, p1_inf, "vs", p2n, p2_inf, m_stat])
     return pd.DataFrame(rows, columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
 
@@ -568,9 +572,9 @@ def play_offline_round(move, off_mode, n_wins, n_losses, n_ties, match_log, play
             status = f"⚔️ Round {t_round + 1}/10 | {player_name}: {t_p_wins} | CPU: {t_c_wins} | Ties: {t_ties}"
             t_round += 1
         else:
-            if t_p_wins > t_c_wins: status = f"🏆 10-ROUND VS COMP OVER! {player_name} WINS {t_p_wins}-{t_c_wins}!"
-            elif t_c_wins > t_p_wins: status = f"💀 10-ROUND VS COMP OVER! CPU WINS {t_c_wins}-{t_p_wins}!"
-            else: status = f"⚖️ 10-ROUND VS COMP OVER! IT'S A DRAW {t_p_wins}-{t_c_wins}!"
+            if t_p_wins > t_c_wins: status = f"🏆 10-ROUND VS COMP OVER! {player_name} WINS {t_p_wins}W-{t_c_wins}L-{t_ties}T!"
+            elif t_c_wins > t_p_wins: status = f"💀 10-ROUND VS COMP OVER! CPU WINS {t_c_wins}W-{t_p_wins}L-{t_ties}T!"
+            else: status = f"⚖️ 10-ROUND VS COMP OVER! IT'S A DRAW {t_p_wins}W-{t_c_wins}L-{t_ties}T!"
             
             update_offline_leaderboards(player_name, t_p_wins, t_c_wins, t_ties)
             t_active = False
@@ -679,7 +683,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
         **GAME MODES:**
         * **Casual 1v1:** Play a standard Best-of-3 or Best-of-5 match against a friend online.
         * **PvP Tournament:** A bracket-style elimination tournament for 3 to 16 players. Players without an opponent get an automatic "Bye" to the next round.
-        * **PvC Tournament (Online & Offline):** Compete in a 3-16 player bracket by playing 10 rounds against the CPU! Whoever beats the CPU more across 10 rounds advances to the next stage.
+        * **PvC Tournament (Online & Offline):** Compete in a 3-16 player bracket by playing 10 rounds against the CPU! Whoever beats the CPU more across 10 rounds advances to the next stage (ties break deadlocks).
         * **10-Round vs Comp (Offline):** Play a 10-round solo match against the CPU. Score 10/10 to reach the Perfect 10 Hall of Fame, or rank on the 10-Round vs Comp Leaderboard!
         """)
 
