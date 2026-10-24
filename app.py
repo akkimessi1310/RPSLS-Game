@@ -669,7 +669,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
         btn_hard_reset = gr.Button("🛑 HARD RESET APP", variant="stop")
         
     gr.Markdown("### Welcome! Enter your name below to play Online or Offline.")
-    my_name = gr.Textbox(label="Player Name", value="Player 1")
 
     with gr.Accordion("📜 Game Rules & Modes Explained (Click to Expand)", open=False):
         gr.Markdown("""
@@ -686,6 +685,8 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
         * **PvC Tournament (Online & Offline):** Compete in a 3-16 player bracket by playing 10 rounds against the CPU! Whoever beats the CPU more across 10 rounds advances to the next stage (ties break deadlocks).
         * **10-Round vs Comp (Offline):** Play a 10-round solo match against the CPU. Score 10/10 to reach the Perfect 10 Hall of Fame, or rank on the 10-Round vs Comp Leaderboard!
         """)
+
+    my_name = gr.Textbox(label="Player Name", value="Player 1")
 
     gr.Markdown("---")
     gr.Markdown("## 🌐 ONLINE MULTIPLAYER")
