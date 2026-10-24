@@ -82,6 +82,14 @@ def update_offline_leaderboards(player_name, p_wins, c_wins, ties):
             redis_client.set("RG_OFFLINE_LEADERBOARD", json.dumps(lb))
     except: pass
 
+def update_offline_pvc_hof(champ_name, lobby_size):
+    try:
+        hof_str = redis_client.get("RG_OFFLINE_PVC_HOF")
+        hof = json.loads(hof_str) if hof_str else []
+        hof.append([champ_name, "PvC Offline Tournament (10 Rounds)", lobby_size, "🏆 Champion"])
+        redis_client.set("RG_OFFLINE_PVC_HOF", json.dumps(hof))
+    except: pass
+
 def get_leaderboard_data():
     try:
         data = redis_client.get("RG_GLOBAL_LEADERBOARD")
@@ -99,6 +107,13 @@ def get_offline_lb_data():
     try:
         data = redis_client.get("RG_OFFLINE_LEADERBOARD")
         return json.loads(data) if data else []
+    except: return []
+
+def get_offline_pvc_hof_data():
+    try:
+        data = redis_client.get("RG_OFFLINE_PVC_HOF")
+        hof = json.loads(data) if data else []
+        return hof[::-1]
     except: return []
 
 def append_global_match_log(round_num, p1, m1, p2, m2, res):
@@ -121,6 +136,7 @@ def wipe_all_leaderboards():
         redis_client.delete("RG_GLOBAL_LEADERBOARD")
         redis_client.delete("RG_OFFLINE_HOF")
         redis_client.delete("RG_OFFLINE_LEADERBOARD")
+        redis_client.delete("RG_OFFLINE_PVC_HOF")
         redis_client.delete("RG_GLOBAL_MATCH_LOGS")
     except: pass
     return load_all_leaderboards_once()
@@ -282,9 +298,9 @@ def leave_online_room():
 df_empty_bracket = pd.DataFrame(columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
 df_empty_history = pd.DataFrame(columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
 df_empty_lb = pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
-df_empty_off = pd.DataFrame(columns=["Round ID", "Player Move", "CPU Move", "Winner"])
 df_empty_off_hof = pd.DataFrame(columns=["Player Name", "Achievement", "Final Record"])
 df_empty_off_lb = pd.DataFrame(columns=["Player Name", "Wins", "Losses", "Ties", "Win Rate"])
+df_empty_off_pvc_hof = pd.DataFrame(columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"])
 
 def load_all_leaderboards_once():
     lb_data = get_leaderboard_data()
@@ -295,8 +311,11 @@ def load_all_leaderboards_once():
     
     off_lb_data = get_offline_lb_data()
     df_off_lb = pd.DataFrame(off_lb_data, columns=["Player Name", "Wins", "Losses", "Ties", "Win Rate"]) if off_lb_data else df_empty_off_lb
+
+    off_pvc_data = get_offline_pvc_hof_data()
+    df_off_pvc = pd.DataFrame(off_pvc_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if off_pvc_data else df_empty_off_pvc_hof
     
-    return df_lb, df_hof, df_off_lb
+    return df_lb, df_hof, df_off_lb, df_off_pvc
 
 def sync_ui(client_id, room_code):
     if not room_code: return "<h3>Welcome to the Arena</h3>", "Waiting...", df_empty_bracket, df_empty_history, gr.update(visible=False)
@@ -354,31 +373,193 @@ def sync_ui(client_id, room_code):
     return html, status, df_bracket, df_logs, gr.update(visible=False)
 
 # ==========================================
-# 4. RESTORED OFFLINE LOGIC (Practice + Tournament)
+# 4. OFFLINE LOGIC (Endless, 10-Rd vs Comp, PvC Offline Tournament)
 # ==========================================
-def start_offline_tournament(player_name):
-    if not player_name or not str(player_name).strip(): player_name = "Player 1"
-    return True, 1, 0, 0, 0, f"⚔️ Tournament Started! Round 1/10 | {player_name}: 0 | CPU: 0 | Ties: 0"
+def format_offline_bracket(pvc_state):
+    if not pvc_state or not pvc_state.get("bracket"):
+        return df_empty_bracket
+    rows = []
+    for m in pvc_state["bracket"]:
+        p1n = m["p1"]
+        p2n = m["p2"] if m["p2"] else "BYE"
+        m_stat = f"Winner: {m['winner']}" if m["winner"] else "Playing"
+        p1_inf = f"{m['p1_stats']['w']}W-{m['p1_stats']['l']}L (Rd {m['p1_stats']['played']}/10)"
+        p2_inf = f"{m['p2_stats']['w']}W-{m['p2_stats']['l']}L (Rd {m['p2_stats']['played']}/10)" if m["p2"] else "-"
+        rows.append([p1n, p1_inf, "vs", p2n, p2_inf, m_stat])
+    return pd.DataFrame(rows, columns=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"])
 
-def play_offline_round(move, n_wins, n_losses, n_ties, match_log, player_name, t_active, t_round, t_p_wins, t_c_wins, t_ties):
-    if not player_name or not str(player_name).strip(): player_name = "Player 1"
-    cpu_move = random.randint(1, 5)
-    m_name, c_name = CHOICES[move], CHOICES[cpu_move]
-    
-    res = resolve_matchup(move, cpu_move)
-    winner_name = player_name if res == "P1" else "CPU" if res == "P2" else "Tie"
-    match_log.insert(0, [len(match_log) + 1, m_name, c_name, winner_name])
-    df_off = pd.DataFrame(match_log, columns=["Round ID", "Player Move", "CPU Move", "Winner"])
+def get_next_offline_pvc_prompt(pvc_state):
+    if not pvc_state or not pvc_state.get("active"):
+        return "Tournament Inactive"
+    for m in pvc_state["bracket"]:
+        if m["winner"] is None:
+            if m["p1_stats"]["played"] < 10:
+                return f"🕹️ Stage {pvc_state['stage']} | 🎮 {m['p1']}'s Turn vs CPU (Round {m['p1_stats']['played'] + 1}/10)"
+            elif m["p2"] and m["p2_stats"]["played"] < 10:
+                return f"🕹️ Stage {pvc_state['stage']} | 🎮 {m['p2']}'s Turn vs CPU (Round {m['p2_stats']['played'] + 1}/10)"
+    return "Tournament Completed"
 
-    if not t_active:
-        if res == "P1": n_wins += 1
-        elif res == "P2": n_losses += 1
-        else: n_ties += 1
-        msg = f"{'🎉 You Win!' if res == 'P1' else '😢 CPU Wins!' if res == 'P2' else '🤝 Tie!'} {m_name} vs {c_name}"
-        stats = f"🏆 Wins: {n_wins} | 🤖 Losses: {n_losses} | 🤝 Ties: {n_ties}"
-        return msg, stats, df_off, n_wins, n_losses, n_ties, t_active, t_round, t_p_wins, t_c_wins, t_ties, "Endless Practice Active"
-    
+def toggle_offline_mode(mode):
+    if mode == "Endless Practice":
+        return gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), "Endless Practice Active"
+    elif mode == "10-Round vs Comp":
+        return gr.update(visible=True, value="⚔️ Start 10-Round vs Comp"), gr.update(visible=False), gr.update(visible=False), "Click 'Start 10-Round vs Comp' to begin!"
     else:
+        return gr.update(visible=True, value="🏆 Start PvC Offline Tournament"), gr.update(visible=True), gr.update(visible=True), "Enter 3-16 players and click Start!"
+
+def start_offline_mode(mode, player_name, participants_str):
+    if not player_name or not str(player_name).strip(): player_name = "Player 1"
+    
+    if mode == "10-Round vs Comp":
+        return True, 1, 0, 0, 0, {"active": False}, f"⚔️ 10-Round vs Comp Started! Round 1/10 | {player_name}: 0 | CPU: 0 | Ties: 0", df_empty_bracket
+    
+    elif mode == "PvC Offline Tournament (10 Rounds)":
+        raw_names = [x.strip() for x in str(participants_str).split(",") if x.strip()]
+        if player_name not in raw_names:
+            raw_names.insert(0, player_name)
+        
+        seen = set()
+        players_list = []
+        for n in raw_names:
+            if n not in seen:
+                seen.add(n)
+                players_list.append(n)
+                
+        while len(players_list) < 3:
+            bot_name = f"Challenger {len(players_list)}"
+            if bot_name not in seen:
+                seen.add(bot_name)
+                players_list.append(bot_name)
+        if len(players_list) > 16:
+            players_list = players_list[:16]
+            
+        lobby_size = len(players_list)
+        random.shuffle(players_list)
+        
+        n = len(players_list)
+        next_pow2 = 2 ** math.ceil(math.log2(n))
+        byes = next_pow2 - n
+        first_round_count = n - byes
+        
+        matches = []
+        for i in range(0, first_round_count, 2):
+            matches.append({
+                "p1": players_list[i], "p2": players_list[i+1],
+                "p1_stats": {"w": 0, "l": 0, "t": 0, "played": 0},
+                "p2_stats": {"w": 0, "l": 0, "t": 0, "played": 0},
+                "winner": None
+            })
+        for i in range(first_round_count, n):
+            matches.append({
+                "p1": players_list[i], "p2": None,
+                "p1_stats": {"w": 0, "l": 0, "t": 0, "played": 0},
+                "p2_stats": {"w": 0, "l": 0, "t": 0, "played": 0},
+                "winner": players_list[i]
+            })
+            
+        pvc_state = {
+            "active": True,
+            "stage": 1,
+            "lobby_size": lobby_size,
+            "bracket": matches,
+            "champion": None
+        }
+        status = get_next_offline_pvc_prompt(pvc_state)
+        return False, 1, 0, 0, 0, pvc_state, status, format_offline_bracket(pvc_state)
+        
+    return False, 1, 0, 0, 0, {"active": False}, "Endless Practice Active", df_empty_bracket
+
+def play_offline_round(move, off_mode, n_wins, n_losses, n_ties, match_log, player_name, t_active, t_round, t_p_wins, t_c_wins, t_ties, pvc_state):
+    if not player_name or not str(player_name).strip(): player_name = "Player 1"
+    
+    # 1. PvC Offline Tournament (10 Rounds)
+    if off_mode == "PvC Offline Tournament (10 Rounds)":
+        if not pvc_state or not pvc_state.get("active"):
+            df_off = pd.DataFrame(match_log, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if match_log else df_empty_history
+            return "⚠️ Click 'Start PvC Offline Tournament' first!", f"🏆 Wins: {n_wins} | 🤖 Losses: {n_losses} | 🤝 Ties: {n_ties}", df_off, n_wins, n_losses, n_ties, t_active, t_round, t_p_wins, t_c_wins, t_ties, pvc_state, "Click Start above to begin!", format_offline_bracket(pvc_state)
+        
+        active_match = None
+        is_p1 = True
+        for m in pvc_state["bracket"]:
+            if m["winner"] is None:
+                active_match = m
+                if m["p1_stats"]["played"] < 10:
+                    is_p1 = True
+                else:
+                    is_p1 = False
+                break
+                
+        if not active_match:
+            df_off = pd.DataFrame(match_log, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if match_log else df_empty_history
+            return "Tournament Over!", f"🏆 Wins: {n_wins} | 🤖 Losses: {n_losses} | 🤝 Ties: {n_ties}", df_off, n_wins, n_losses, n_ties, t_active, t_round, t_p_wins, t_c_wins, t_ties, pvc_state, "Tournament Over", format_offline_bracket(pvc_state)
+
+        curr_player = active_match["p1"] if is_p1 else active_match["p2"]
+        stats = active_match["p1_stats"] if is_p1 else active_match["p2_stats"]
+        
+        cpu_move = random.randint(1, 5)
+        m_name, c_name = CHOICES[move], CHOICES[cpu_move]
+        res = resolve_matchup(move, cpu_move)
+        
+        stats["played"] += 1
+        if res == "P1": stats["w"] += 1
+        elif res == "P2": stats["l"] += 1
+        else: stats["t"] += 1
+        
+        log_round = f"Stage {pvc_state['stage']} (Rd {stats['played']})"
+        match_log.insert(0, [log_round, curr_player, m_name, "CPU", c_name, res])
+        df_off = pd.DataFrame(match_log, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+        
+        msg = f"[{curr_player}] {'🎉 Wins!' if res == 'P1' else '😢 CPU Wins!' if res == 'P2' else '🤝 Tie!'} ({m_name} vs {c_name})"
+        
+        if active_match["p1_stats"]["played"] == 10 and active_match["p2_stats"]["played"] == 10:
+            s1, s2 = active_match["p1_stats"], active_match["p2_stats"]
+            if s1["w"] > s2["w"]: active_match["winner"] = active_match["p1"]
+            elif s2["w"] > s1["w"]: active_match["winner"] = active_match["p2"]
+            elif s1["t"] > s2["t"]: active_match["winner"] = active_match["p1"]
+            elif s2["t"] > s1["t"]: active_match["winner"] = active_match["p2"]
+            else: active_match["winner"] = random.choice([active_match["p1"], active_match["p2"]])
+            
+            if all(m["winner"] is not None for m in pvc_state["bracket"]):
+                winners = [m["winner"] for m in pvc_state["bracket"]]
+                if len(winners) == 1:
+                    pvc_state["active"] = False
+                    pvc_state["champion"] = winners[0]
+                    update_offline_pvc_hof(winners[0], pvc_state["lobby_size"])
+                    status = f"🏆 OFFLINE TOURNAMENT OVER! Champion: {winners[0]}!"
+                else:
+                    new_matches = []
+                    for i in range(0, len(winners), 2):
+                        new_matches.append({
+                            "p1": winners[i], "p2": winners[i+1],
+                            "p1_stats": {"w": 0, "l": 0, "t": 0, "played": 0},
+                            "p2_stats": {"w": 0, "l": 0, "t": 0, "played": 0},
+                            "winner": None
+                        })
+                    pvc_state["bracket"] = new_matches
+                    pvc_state["stage"] += 1
+                    status = get_next_offline_pvc_prompt(pvc_state)
+            else:
+                status = get_next_offline_pvc_prompt(pvc_state)
+        else:
+            status = get_next_offline_pvc_prompt(pvc_state)
+            
+        stats_str = f"🏆 Wins: {n_wins} | 🤖 Losses: {n_losses} | 🤝 Ties: {n_ties}"
+        return msg, stats_str, df_off, n_wins, n_losses, n_ties, t_active, t_round, t_p_wins, t_c_wins, t_ties, pvc_state, status, format_offline_bracket(pvc_state)
+
+    # 2. 10-Round vs Comp
+    elif off_mode == "10-Round vs Comp":
+        if not t_active:
+            df_off = pd.DataFrame(match_log, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if match_log else df_empty_history
+            return "⚠️ Click 'Start 10-Round vs Comp' first!", f"🏆 Wins: {n_wins} | 🤖 Losses: {n_losses} | 🤝 Ties: {n_ties}", df_off, n_wins, n_losses, n_ties, t_active, t_round, t_p_wins, t_c_wins, t_ties, pvc_state, "Click 'Start 10-Round vs Comp' to begin!", df_empty_bracket
+
+        cpu_move = random.randint(1, 5)
+        m_name, c_name = CHOICES[move], CHOICES[cpu_move]
+        res = resolve_matchup(move, cpu_move)
+        
+        log_round = f"10-Rd (Rd {t_round})"
+        match_log.insert(0, [log_round, player_name, m_name, "CPU", c_name, res])
+        df_off = pd.DataFrame(match_log, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+
         if res == "P1": t_p_wins += 1
         elif res == "P2": t_c_wins += 1
         else: t_ties += 1
@@ -387,25 +568,44 @@ def play_offline_round(move, n_wins, n_losses, n_ties, match_log, player_name, t
             status = f"⚔️ Round {t_round + 1}/10 | {player_name}: {t_p_wins} | CPU: {t_c_wins} | Ties: {t_ties}"
             t_round += 1
         else:
-            if t_p_wins > t_c_wins: status = f"🏆 TOURNAMENT OVER! {player_name} WINS {t_p_wins}-{t_c_wins}!"
-            elif t_c_wins > t_p_wins: status = f"💀 TOURNAMENT OVER! CPU WINS {t_c_wins}-{t_p_wins}!"
-            else: status = f"⚖️ TOURNAMENT OVER! IT'S A DRAW {t_p_wins}-{t_c_wins}!"
+            if t_p_wins > t_c_wins: status = f"🏆 10-ROUND VS COMP OVER! {player_name} WINS {t_p_wins}-{t_c_wins}!"
+            elif t_c_wins > t_p_wins: status = f"💀 10-ROUND VS COMP OVER! CPU WINS {t_c_wins}-{t_p_wins}!"
+            else: status = f"⚖️ 10-ROUND VS COMP OVER! IT'S A DRAW {t_p_wins}-{t_c_wins}!"
             
             update_offline_leaderboards(player_name, t_p_wins, t_c_wins, t_ties)
             t_active = False
 
         msg = f"{'🎉 You Win!' if res == 'P1' else '😢 CPU Wins!' if res == 'P2' else '🤝 Tie!'} {m_name} vs {c_name}"
-        stats = f"🏆 Wins: {n_wins} | 🤖 Losses: {n_losses} | 🤝 Ties: {n_ties}"
-        return msg, stats, df_off, n_wins, n_losses, n_ties, t_active, t_round, t_p_wins, t_c_wins, t_ties, status
+        stats_str = f"🏆 Wins: {n_wins} | 🤖 Losses: {n_losses} | 🤝 Ties: {n_ties}"
+        return msg, stats_str, df_off, n_wins, n_losses, n_ties, t_active, t_round, t_p_wins, t_c_wins, t_ties, pvc_state, status, df_empty_bracket
+
+    # 3. Endless Practice
+    else:
+        cpu_move = random.randint(1, 5)
+        m_name, c_name = CHOICES[move], CHOICES[cpu_move]
+        res = resolve_matchup(move, cpu_move)
+        
+        if res == "P1": n_wins += 1
+        elif res == "P2": n_losses += 1
+        else: n_ties += 1
+        
+        total_endless = n_wins + n_losses + n_ties
+        log_round = f"Round {total_endless}"
+        match_log.insert(0, [log_round, player_name, m_name, "CPU", c_name, res])
+        df_off = pd.DataFrame(match_log, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"])
+        
+        msg = f"{'🎉 You Win!' if res == 'P1' else '😢 CPU Wins!' if res == 'P2' else '🤝 Tie!'} {m_name} vs {c_name}"
+        stats_str = f"🏆 Wins: {n_wins} | 🤖 Losses: {n_losses} | 🤝 Ties: {n_ties}"
+        return msg, stats_str, df_off, n_wins, n_losses, n_ties, t_active, t_round, t_p_wins, t_c_wins, t_ties, pvc_state, "Endless Practice Active", df_empty_bracket
 
 def reset_offline():
-    return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", df_empty_off, 0, 0, 0, [], False, 1, 0, 0, 0, "Endless Practice Active"
+    return "Practice Mode Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", df_empty_history, 0, 0, 0, [], False, 1, 0, 0, 0, {"active": False}, "Endless Practice Active", df_empty_bracket
 
 def hard_reset_all():
     return (
         "", gr.update(visible=True), gr.update(visible=False), 
-        "App Fully Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", df_empty_off, 0, 0, 0, [], 
-        False, 1, 0, 0, 0, "Endless Practice Active"
+        "App Fully Reset.", "🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", df_empty_history, 0, 0, 0, [], 
+        False, 1, 0, 0, 0, {"active": False}, "Endless Practice Active", df_empty_bracket
     )
 
 # ==========================================
@@ -416,8 +616,8 @@ def export_all_data(offline_log):
     file_path = os.path.join(temp_dir, f"RPSLS_Arcade_Data.xlsx")
     
     with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-        df_off = pd.DataFrame(offline_log, columns=["Round ID", "Player Move", "CPU Move", "Winner"]) if offline_log else df_empty_off
-        df_off.to_excel(writer, sheet_name="Offline Practice Logs", index=False)
+        df_off = pd.DataFrame(offline_log, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if offline_log else df_empty_history
+        df_off.to_excel(writer, sheet_name="Offline Round History", index=False)
         
         lb_data = get_leaderboard_data()
         df_lb = pd.DataFrame(lb_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if lb_data else df_empty_lb
@@ -429,7 +629,11 @@ def export_all_data(offline_log):
         
         off_lb_data = get_offline_lb_data()
         df_off_lb = pd.DataFrame(off_lb_data, columns=["Player Name", "Wins", "Losses", "Ties", "Win Rate"]) if off_lb_data else df_empty_off_lb
-        df_off_lb.to_excel(writer, sheet_name="Offline Leaderboard", index=False)
+        df_off_lb.to_excel(writer, sheet_name="10-Round vs Comp LB", index=False)
+
+        off_pvc_data = get_offline_pvc_hof_data()
+        df_off_pvc = pd.DataFrame(off_pvc_data, columns=["Champion Name", "Tournament Mode", "Lobby Size", "Status"]) if off_pvc_data else df_empty_off_pvc_hof
+        df_off_pvc.to_excel(writer, sheet_name="Offline Hall of Fame", index=False)
 
         logs_data = get_global_match_logs()
         df_on = pd.DataFrame(logs_data, columns=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"]) if logs_data else df_empty_history
@@ -453,6 +657,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     off_w, off_c, off_t, off_log = gr.State(0), gr.State(0), gr.State(0), gr.State([])
     off_t_active, off_t_round = gr.State(False), gr.State(1)
     off_t_p, off_t_c, off_t_ties = gr.State(0), gr.State(0), gr.State(0)
+    off_pvc_state = gr.State({"active": False})
 
     with gr.Row():
         gr.Markdown("# 🕹️ RPSLS Arcade Arena")
@@ -462,7 +667,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     gr.Markdown("### Welcome! Enter your name below to play Online or Offline.")
     my_name = gr.Textbox(label="Player Name", value="Player 1")
 
-    # --- NEW: RULES SECTION ---
     with gr.Accordion("📜 Game Rules & Modes Explained (Click to Expand)", open=False):
         gr.Markdown("""
         **THE RULES OF COMBAT:**
@@ -475,8 +679,8 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
         **GAME MODES:**
         * **Casual 1v1:** Play a standard Best-of-3 or Best-of-5 match against a friend online.
         * **PvP Tournament:** A bracket-style elimination tournament for 3 to 16 players. Players without an opponent get an automatic "Bye" to the next round.
-        * **PvC Tournament:** Compete against your friends online by playing against the CPU! Whoever wins the most out of 10 rounds against the computer advances in the bracket.
-        * **Offline Practice:** Test your skills locally against the CPU to hone your strategy.
+        * **PvC Tournament (Online & Offline):** Compete in a 3-16 player bracket by playing 10 rounds against the CPU! Whoever beats the CPU more across 10 rounds advances to the next stage.
+        * **10-Round vs Comp (Offline):** Play a 10-round solo match against the CPU. Score 10/10 to reach the Perfect 10 Hall of Fame, or rank on the 10-Round vs Comp Leaderboard!
         """)
 
     gr.Markdown("---")
@@ -515,11 +719,27 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     gr.Markdown("---")
     gr.Markdown("## 🤖 OFFLINE PRACTICE")
     with gr.Row():
-        btn_start_off_tourney = gr.Button("⚔️ Start 10-Round Offline Tournament", variant="primary")
+        off_mode_select = gr.Dropdown(
+            ["Endless Practice", "10-Round vs Comp", "PvC Offline Tournament (10 Rounds)"],
+            value="Endless Practice",
+            label="Mode Select"
+        )
+        off_participants = gr.Textbox(
+            label="Tournament Players (Comma-separated, 3-16 players)",
+            value="Player 1, Challenger 1, Challenger 2, Challenger 3",
+            visible=False
+        )
+    
+    with gr.Row():
+        btn_start_off_mode = gr.Button("⚔️ Start Mode", variant="primary", visible=False)
         btn_reset_off = gr.Button("🔄 Reset Offline Data", variant="secondary")
     
-    off_tourney_status = gr.Textbox(label="Tournament Status", value="Endless Practice Active", interactive=False)
+    off_tourney_status = gr.Textbox(label="Mode / Tournament Status", value="Endless Practice Active", interactive=False)
     
+    with gr.Column(visible=False) as off_bracket_col:
+        gr.Markdown("### 📡 Live Offline Match Bracket")
+        off_bracket_view = gr.Dataframe(headers=["Player 1", "Score/Stats", " ", "Player 2", "Score/Stats", "Status"], interactive=False)
+
     with gr.Row():
         with gr.Column():
             with gr.Row():
@@ -529,7 +749,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
             off_stats = gr.Textbox(label="Endless Session Analytics", value="🏆 Wins: 0 | 🤖 Losses: 0 | 🤝 Ties: 0", interactive=False)
             
     gr.Markdown("### 🕒 Offline Round History Tracking")
-    off_history_view = gr.Dataframe(headers=["Round ID", "Player Move", "CPU Move", "Winner"], interactive=False)
+    off_history_view = gr.Dataframe(headers=["Round", "Player 1", "Move 1", "Player 2", "Move 2", "Result"], interactive=False)
 
     gr.Markdown("---")
     gr.Markdown("## 🏆 HALL OF FAME & LEADERBOARDS")
@@ -544,8 +764,11 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     with gr.Accordion("👑 Offline Perfect 10 Hall of Fame", open=False):
         off_hof_view = gr.Dataframe(headers=["Player Name", "Achievement", "Final Record"], interactive=False)
         
-    with gr.Accordion("📊 Offline Tournament Leaderboard", open=False):
+    with gr.Accordion("📊 10-Round vs Comp Leaderboard", open=False):
         off_lb_view = gr.Dataframe(headers=["Player Name", "Wins", "Losses", "Ties", "Win Rate"], interactive=False)
+
+    with gr.Accordion("🏅 Offline Hall of Fame (PvC Offline Tournament)", open=False):
+        off_pvc_hof_view = gr.Dataframe(headers=["Champion Name", "Tournament Mode", "Lobby Size", "Status"], interactive=False)
     
     gr.Markdown("Export all Offline Practice stats, Global Leaderboards, and completed Online Tournament logs to Excel.")
     btn_export_all = gr.Button("💾 Generate Excel Spreadsheets", variant="secondary")
@@ -554,13 +777,13 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
     # --- EVENT TRIGGERS ---
     timer = gr.Timer(value=1)
     btn_theme.click(fn=None, js="() => { document.documentElement.classList.toggle('dark'); }")
-    demo.load(load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
+    demo.load(load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view, off_pvc_hof_view])
     
-    # Hide Match Length button dynamically if PvC Tournament is selected
     host_mode.change(toggle_match_length, inputs=[host_mode], outputs=[host_bo])
+    off_mode_select.change(toggle_offline_mode, inputs=[off_mode_select], outputs=[btn_start_off_mode, off_participants, off_bracket_col, off_tourney_status])
     
-    btn_refresh_lb.click(load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
-    btn_wipe_lb.click(wipe_all_leaderboards, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view])
+    btn_refresh_lb.click(load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view, off_pvc_hof_view])
+    btn_wipe_lb.click(wipe_all_leaderboards, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view, off_pvc_hof_view])
     
     # Online
     btn_host.click(host_room, inputs=[client_id, my_name, host_mode, host_bo], outputs=[active_room, sys_msg, screen_setup, screen_game])
@@ -573,15 +796,31 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
         btn.click(make_move_online, inputs=[client_id, active_room, gr.State(val)], outputs=[])
 
     # Offline 
-    btn_start_off_tourney.click(start_offline_tournament, inputs=[my_name], outputs=[off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_tourney_status])
+    btn_start_off_mode.click(
+        start_offline_mode,
+        inputs=[off_mode_select, my_name, off_participants],
+        outputs=[off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_pvc_state, off_tourney_status, off_bracket_view]
+    )
     for btn, val in [(off_r, 1), (off_p, 2), (off_s, 3), (off_l, 4), (off_k, 5)]:
-        btn.click(play_offline_round, 
-                  inputs=[gr.State(val), off_w, off_c, off_t, off_log, my_name, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties], 
-                  outputs=[off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_tourney_status])
-    btn_reset_off.click(reset_offline, inputs=[], outputs=[off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_log, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_tourney_status])
+        btn.click(
+            play_offline_round, 
+            inputs=[gr.State(val), off_mode_select, off_w, off_c, off_t, off_log, my_name, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_pvc_state], 
+            outputs=[off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_pvc_state, off_tourney_status, off_bracket_view]
+        ).then(
+            load_all_leaderboards_once, inputs=[], outputs=[lb_view_setup, off_hof_view, off_lb_view, off_pvc_hof_view]
+        )
+    btn_reset_off.click(
+        reset_offline,
+        inputs=[],
+        outputs=[off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_log, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_pvc_state, off_tourney_status, off_bracket_view]
+    )
 
     # Resets & Exports
-    btn_hard_reset.click(hard_reset_all, inputs=[], outputs=[active_room, screen_setup, screen_game, off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_log, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_tourney_status])
+    btn_hard_reset.click(
+        hard_reset_all,
+        inputs=[],
+        outputs=[active_room, screen_setup, screen_game, off_msg, off_stats, off_history_view, off_w, off_c, off_t, off_log, off_t_active, off_t_round, off_t_p, off_t_c, off_t_ties, off_pvc_state, off_tourney_status, off_bracket_view]
+    )
     
     btn_export_all.click(export_all_data, inputs=[off_log], outputs=[download_file]).then(lambda: gr.update(visible=True), outputs=[download_file])
 
